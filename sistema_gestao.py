@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Central de Monitoramento | FN Distribuidora", page_icon="🚚", layout="wide")
 
-# ================= ESTILIZAÇÃO VISUAL (Cores FN Distribuidora) =================
+# ================= ESTILIZAÇÃO VISUAL =================
 st.markdown("""
     <style>
     .stApp { background-color: #0b0f19; color: #f0f2f6; }
@@ -35,12 +35,11 @@ st.markdown("""
 
 ARQUIVO_LOGO = "logo_fn.jpg"
 
-# ----------------- CONEXÃO COM O BANCO DE DADOS (NEON POSTGRESQL) -----------------
+# ================= 1. CONEXÃO COM O BANCO DE DADOS (PRIMEIRO DE TUDO) =================
 @st.cache_resource
 def get_engine():
     try:
-        # Pega a URL dos segredos do Streamlit ou usa fallback local
-        db_url = st.secrets["database"]["url"]
+        db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
         return create_engine(db_url)
     except Exception as e:
         st.error(f"Erro ao conectar com o banco de dados PostgreSQL: {e}")
@@ -48,7 +47,9 @@ def get_engine():
 
 engine = get_engine()
 
-# ----------------- FUNÇÕES DE BANCO DE DADOS -----------------
+engine = get_engine()
+
+# ================= 2. AGORA AS FUNÇÕES QUE USAM O 'engine' =================
 def carregar_colaboradores():
     if engine:
         try:
@@ -59,7 +60,6 @@ def carregar_colaboradores():
                 return df_c
         except Exception:
             pass
-    # Fallback caso a tabela não exista ainda
     return pd.DataFrame([{"Colaborador": "Carlos Eduardo", "Funcao": "Motorista"}])
 
 def carregar_naturezas():
@@ -98,7 +98,6 @@ def carregar_dados():
         try:
             query = "SELECT id, data, colaborador, funcao, rota, tipo, motivo, detalhe, pontos, status, acao_gestor, data_tratativa, registrado_por FROM ocorrencias"
             df_o = pd.read_sql(query, engine)
-            # Normaliza os nomes das colunas para o padrão do app
             df_o.columns = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
             return df_o
         except Exception:
@@ -107,6 +106,13 @@ def carregar_dados():
     colunas = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
     return pd.DataFrame(columns=colunas)
 
+# Inicializa dados
+df_colab = carregar_colaboradores()
+lista_naturezas = carregar_naturezas()
+lista_motivos = carregar_motivos()
+df = carregar_dados()
+if "Registrado_Por" not in df.columns and not df.empty:
+    df["Registrado_Por"] = "Torre"
 # Inicializa dados na memória
 df_colab = carregar_colaboradores()
 lista_naturezas = carregar_naturezas()
