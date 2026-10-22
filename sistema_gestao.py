@@ -541,6 +541,42 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
         st.markdown("#### Efetivo Atual no Banco:")
         st.dataframe(df_colab.sort_values(by="Colaborador"), use_container_width=True, hide_index=True)
 
+    with aba_individual:
+        c_add, c_rem = st.columns(2)
+        with c_add:
+            st.markdown("#### ➕ Adicionar Novo Colaborador")
+            novo_nome = st.text_input("Nome Completo:", key="input_novo_nome")
+            nova_func = st.selectbox("Função:", ["Motorista", "Ajudante"], key="select_nova_func")
+            if st.button("Salvar Colaborador", key="btn_salvar_ind"):
+                if novo_nome.strip() and engine:
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f) ON CONFLICT (colaborador) DO UPDATE SET funcao = :f"),
+                                {"c": novo_nome.strip().title(), "f": nova_func}
+                            )
+                        st.success("✅ Colaborador adicionado com sucesso no Neon!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao salvar: {e}")
+                        
+        with c_rem:
+            st.markdown("#### 🗑️ Remover Colaborador")
+            lista_atuais = sorted(df_colab["Colaborador"].unique()) if not df_colab.empty else []
+            if lista_atuais:
+                rem_nome = st.selectbox("Selecione para remover:", lista_atuais, key="select_rem_colab")
+                if st.button("Remover da Lista", key="btn_remover_ind"):
+                    if engine:
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM colaboradores WHERE colaborador = :c"), {"c": rem_nome})
+                            st.warning(f"⚠️ Colaborador {rem_nome} removido do banco!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao remover: {e}")
+            else:
+                st.info("Nenhum colaborador cadastrado na base.")
+
     with aba_parametros:
         st.markdown('<div class="titulo-secao">⚙️ Gerenciar Naturezas e Motivos</div>', unsafe_allow_html=True)
         c_nat, c_mot = st.columns(2)
