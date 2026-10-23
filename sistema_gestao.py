@@ -162,7 +162,7 @@ if not st.session_state["autenticado"]:
         with st.form("form_login_seguro"):
             user_escolhido = st.selectbox(
                 "Selecionar Usuário:", 
-                ["Torre de Monitoramento", "Gleidiene (Manutenção)", "Breno (Manutenção)", "Gestão / Admin"]
+                ["Caroline", "Cheila", "Yara", "Kennia", "Tiago", "Gleidiene (Manutenção)", "Rennan", "Breno (Manutenção)"]
             )
             senha_digitada = st.text_input("Senha de Acesso:", type="password")
             submitted = st.form_submit_button("Entrar no Sistema", use_container_width=True, type="primary")
@@ -170,10 +170,14 @@ if not st.session_state["autenticado"]:
             if submitted:
                 # Dicionário de senhas dos usuários
                 senhas_cadastradas = {
-                    "Torre de Monitoramento": "torre123",
+                    "Cheila": "torre123",
+                    "Caroline": "torre123",
                     "Gleidiene (Manutenção)": "manut123",
                     "Breno (Manutenção)": "manut123",
-                    "Gestão / Admin": "gestao123"
+                    "Rennan": "gestao123"
+                    "Tiago": "gestao123"
+                    "Kennia": "gestao123"
+                    "Yara": "gestao123"
                 }
                 
                 if senha_digitada == senhas_cadastradas.get(user_escolhido):
