@@ -38,24 +38,17 @@ ARQUIVO_LOGO = "logo_fn.jpg"
 @st.cache_resource
 def get_engine():
     try:
-        # Tenta ler do secrets.toml; se não achar, usa a string direta sem channel_binding (mais rápida no pooler)
-        if "database" in st.secrets and "url" in st.secrets["database"]:
-            db_url = st.secrets["database"]["url"]
-        else:
-            db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require"
-        
+        db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require"
         return create_engine(
             db_url,
-            pool_size=5,           # Mantém até 5 conexões prontas na memória
-            max_overflow=10,       # Suporta picos de acessos simultâneos
-            pool_pre_ping=True,    # Testa se a conexão está viva antes de usar (evita travamentos)
-            pool_recycle=300       # Renova conexões a cada 5 min para evitar quedas do Neon
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=300
         )
     except Exception as e:
         st.error(f"Erro ao conectar com o banco de dados PostgreSQL: {e}")
         return None
-
-engine = get_engine()
 
 # ================= 2. LEITURA EM CACHE (ZERO LATÊNCIA NOS CLIQUES) =================
 @st.cache_data(ttl=120, show_spinner=False)
