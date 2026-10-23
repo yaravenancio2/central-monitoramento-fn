@@ -50,6 +50,8 @@ def get_engine():
         st.error(f"Erro ao conectar com o banco de dados PostgreSQL: {e}")
         return None
 
+engine = get_engine()
+
 # ================= 2. LEITURA EM CACHE (ZERO LATÊNCIA NOS CLIQUES) =================
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_colaboradores():
@@ -115,6 +117,14 @@ def carregar_dados():
     
     colunas = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
     return pd.DataFrame(columns=colunas)
+
+# Inicializa os dados na memória
+df_colab = carregar_colaboradores()
+lista_naturezas = carregar_naturezas()
+lista_motivos = carregar_motivos()
+df = carregar_dados()
+if "Registrado_Por" not in df.columns and not df.empty:
+    df["Registrado_Por"] = "Torre"
 
 # Inicializa os dados na memória (O QUE ESTAVA FALTANDO)
 df_colab = carregar_colaboradores()
