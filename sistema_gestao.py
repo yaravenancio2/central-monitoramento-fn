@@ -34,52 +34,63 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 ARQUIVO_LOGO = "logo_fn.jpg"
-
-# ================= 1. CONEXÃO COM O BANCO DE DADOS (PRIMEIRO DE TUDO) =================
+# ================= 1. CONEXÃO DE ALTA PERFORMANCE COM POOLING =================
 @st.cache_resource
 def get_engine():
     try:
-        db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-        return create_engine(db_url)
+        # Tenta ler do secrets.toml; se não achar, usa a string direta sem channel_binding (mais rápida no pooler)
+        if "database" in st.secrets and "url" in st.secrets["database"]:
+            db_url = st.secrets["database"]["url"]
+        else:
+            db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require"
+        
+        return create_engine(
+            db_url,
+            pool_size=5,           # Mantém até 5 conexões prontas na memória
+            max_overflow=10,       # Suporta picos de acessos simultâneos
+            pool_pre_ping=True,    # Testa se a conexão está viva antes de usar (evita travamentos)
+            pool_recycle=300       # Renova conexões a cada 5 min para evitar quedas do Neon
+        )
     except Exception as e:
         st.error(f"Erro ao conectar com o banco de dados PostgreSQL: {e}")
         return None
 
 engine = get_engine()
 
-engine = get_engine()
-
-# ================= 2. AGORA AS FUNÇÕES QUE USAM O 'engine' =================
+# ================= 2. LEITURA EM CACHE (ZERO LATÊNCIA NOS CLIQUES) =================
+@st.cache_data(ttl=120, show_spinner=False)
 def carregar_colaboradores():
     if engine:
         try:
-            query = "SELECT colaborador, funcao FROM colaboradores"
+            query = "SELECT colaborador, funcao FROM colaboradores ORDER BY colaborador"
             df_c = pd.read_sql(query, engine)
-            df_c.columns = ["Colaborador", "Funcao"]
             if not df_c.empty:
+                df_c.columns = ["Colaborador", "Funcao"]
                 return df_c
         except Exception:
             pass
     return pd.DataFrame([{"Colaborador": "Carlos Eduardo", "Funcao": "Motorista"}])
 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_naturezas():
     if engine:
         try:
-            query = "SELECT natureza FROM naturezas"
+            query = "SELECT natureza FROM naturezas ORDER BY id"
             df_n = pd.read_sql(query, engine)
             if not df_n.empty:
-                return df_n["Natureza"].tolist()
+                return df_n["natureza"].tolist()
         except Exception:
             pass
     return ["Negligência Grave", "Devolução por Falha", "Comportamental", "Dificuldade Operacional", "Ação Positiva (Elogio)"]
 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_motivos():
     if engine:
         try:
-            query = "SELECT motivo FROM motivos"
+            query = "SELECT motivo FROM motivos ORDER BY id"
             df_m = pd.read_sql(query, engine)
             if not df_m.empty:
-                return df_m["Motivo"].tolist()
+                return df_m["motivo"].tolist()
         except Exception:
             pass
     return [
@@ -93,10 +104,16 @@ def carregar_motivos():
         "Outros"
     ]
 
+@st.cache_data(ttl=60, show_spinner=False)
 def carregar_dados():
     if engine:
         try:
-            query = "SELECT id, data, colaborador, funcao, rota, tipo, motivo, detalhe, pontos, status, acao_gestor, data_tratativa, registrado_por FROM ocorrencias"
+            query = """
+                SELECT id, data, colaborador, funcao, rota, tipo, motivo, 
+                       detalhe, pontos, status, acao_gestor, data_tratativa, registrado_por 
+                FROM ocorrencias 
+                ORDER BY id DESC
+            """
             df_o = pd.read_sql(query, engine)
             df_o.columns = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
             return df_o
@@ -105,21 +122,6 @@ def carregar_dados():
     
     colunas = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
     return pd.DataFrame(columns=colunas)
-
-# Inicializa dados
-df_colab = carregar_colaboradores()
-lista_naturezas = carregar_naturezas()
-lista_motivos = carregar_motivos()
-df = carregar_dados()
-if "Registrado_Por" not in df.columns and not df.empty:
-    df["Registrado_Por"] = "Torre"
-# Inicializa dados na memória
-df_colab = carregar_colaboradores()
-lista_naturezas = carregar_naturezas()
-lista_motivos = carregar_motivos()
-df = carregar_dados()
-if "Registrado_Por" not in df.columns and not df.empty:
-    df["Registrado_Por"] = "Torre"
 
 # ================= CONTROLE DE ACESSO (LOGIN) =================
 USUARIOS = {
@@ -517,29 +519,44 @@ elif pagina == "➕ Registrar Ocorrência (Torre)":
 # ================= PÁGINA 5: CADASTRAR EQUIPE & PARÂMETROS =================
 elif pagina == "👥 Cadastrar Equipe & Parâmetros":
     st.markdown("## 👥 Gestão de Equipe e Parâmetros do Sistema")
+    
     aba_lote, aba_individual, aba_parametros, aba_limpar = st.tabs([
-        "📋 1. Colaboradores", "➕ 2. Adicionar/Remover", "⚙️ 3. Naturezas e Motivos", "🧹 4. Zerar Base"
+        "📋 1. Colaboradores", 
+        "➕ 2. Adicionar/Remover", 
+        "⚙️ 3. Naturezas e Motivos", 
+        "🧹 4. Zerar Base"
     ])
     
     with aba_lote:
         st.markdown('<div class="titulo-secao">Importação de Colaboradores (Nome;Função)</div>', unsafe_allow_html=True)
-        texto_lote = st.text_area("Cole sua lista aqui:", height=150)
+        st.caption("Cole abaixo a lista dos colaboradores no formato Nome;Função (um por linha).")
+        texto_lote = st.text_area("Cole sua lista aqui:", height=150, key="txt_lote_colab")
+        
         if st.button("🔄 Substituir Base de Colaboradores", use_container_width=True):
             if texto_lote.strip() and engine:
                 linhas = [l.strip() for l in texto_lote.strip().split("\n") if l.strip()]
-                novos_dados = []
+                # Usa dicionário para evitar nomes duplicados na própria lista colada
+                mapa_unicos = {}
                 for l in linhas:
                     partes = l.replace("\t", ";").replace(",", ";").split(";")
                     nome_c = partes[0].strip().title()
                     func_c = "Ajudante" if len(partes) > 1 and "ajud" in partes[1].lower() else "Motorista"
-                    novos_dados.append({"colaborador": nome_c, "funcao": func_c})
+                    if nome_c:
+                        mapa_unicos[nome_c] = func_c
+                
+                novos_dados = [{"c": k, "f": v} for k, v in mapa_unicos.items()]
                 
                 try:
                     with engine.begin() as conn:
                         conn.execute(text("DELETE FROM colaboradores"))
-                        for d in novos_dados:
-                            conn.execute(text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f)"), {"c": d["colaborador"], "f": d["funcao"]})
-                    st.success("✅ Base de colaboradores atualizada no Neon PostgreSQL!")
+                        if novos_dados:
+                            # ENVIO EM LOTE ÚNICO (100x mais rápido que o loop for)
+                            conn.execute(
+                                text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f)"),
+                                novos_dados
+                            )
+                    st.cache_data.clear()
+                    st.success(f"✅ {len(novos_dados)} colaboradores gravados instantaneamente no Neon!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao atualizar: {e}")
@@ -548,12 +565,14 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
         st.dataframe(df_colab.sort_values(by="Colaborador"), use_container_width=True, hide_index=True)
 
     with aba_individual:
+        st.markdown('<div class="titulo-secao">Gerenciamento Individual de Efetivo</div>', unsafe_allow_html=True)
         c_add, c_rem = st.columns(2)
+        
         with c_add:
             st.markdown("#### ➕ Adicionar Novo Colaborador")
-            novo_nome = st.text_input("Nome Completo:", key="input_novo_nome")
-            nova_func = st.selectbox("Função:", ["Motorista", "Ajudante"], key="select_nova_func")
-            if st.button("Salvar Colaborador", key="btn_salvar_ind"):
+            novo_nome = st.text_input("Nome Completo:", key="input_novo_nome_ind")
+            nova_func = st.selectbox("Função:", ["Motorista", "Ajudante"], key="select_nova_func_ind")
+            if st.button("Salvar Colaborador", key="btn_salvar_ind_unico"):
                 if novo_nome.strip() and engine:
                     try:
                         with engine.begin() as conn:
@@ -561,7 +580,8 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
                                 text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f) ON CONFLICT (colaborador) DO UPDATE SET funcao = :f"),
                                 {"c": novo_nome.strip().title(), "f": nova_func}
                             )
-                        st.success("✅ Colaborador adicionado com sucesso no Neon!")
+                        st.cache_data.clear()
+                        st.success(f"✅ {novo_nome.strip().title()} adicionado com sucesso!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}")
@@ -570,12 +590,13 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
             st.markdown("#### 🗑️ Remover Colaborador")
             lista_atuais = sorted(df_colab["Colaborador"].unique()) if not df_colab.empty else []
             if lista_atuais:
-                rem_nome = st.selectbox("Selecione para remover:", lista_atuais, key="select_rem_colab")
-                if st.button("Remover da Lista", key="btn_remover_ind"):
+                rem_nome = st.selectbox("Selecione para remover:", lista_atuais, key="select_rem_colab_unico")
+                if st.button("Remover da Lista", key="btn_remover_ind_unico"):
                     if engine:
                         try:
                             with engine.begin() as conn:
                                 conn.execute(text("DELETE FROM colaboradores WHERE colaborador = :c"), {"c": rem_nome})
+                            st.cache_data.clear()
                             st.warning(f"⚠️ Colaborador {rem_nome} removido do banco!")
                             st.rerun()
                         except Exception as e:
@@ -587,11 +608,12 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
         st.markdown('<div class="titulo-secao">⚙️ Gerenciar Naturezas e Motivos</div>', unsafe_allow_html=True)
         c_nat, c_mot = st.columns(2)
         with c_nat:
-            nova_nat = st.text_input("Nova Natureza:")
-            if st.button("Salvar Natureza") and nova_nat.strip() and engine:
+            nova_nat = st.text_input("Nova Natureza:", key="input_nova_nat")
+            if st.button("Salvar Natureza", key="btn_salvar_nat") and nova_nat.strip() and engine:
                 try:
                     with engine.begin() as conn:
-                        conn.execute(text("INSERT INTO naturezas (natureza) VALUES (:n)"), {"n": nova_nat.strip()})
+                        conn.execute(text("INSERT INTO naturezas (natureza) VALUES (:n) ON CONFLICT (natureza) DO NOTHING"), {"n": nova_nat.strip()})
+                    st.cache_data.clear()
                     st.success("Natureza salva!")
                     st.rerun()
                 except Exception as e:
@@ -599,11 +621,12 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
             st.write("Atuais:", lista_naturezas)
             
         with c_mot:
-            novo_mot = st.text_input("Novo Motivo:")
-            if st.button("Salvar Motivo") and novo_mot.strip() and engine:
+            novo_mot = st.text_input("Novo Motivo:", key="input_novo_mot")
+            if st.button("Salvar Motivo", key="btn_salvar_mot") and novo_mot.strip() and engine:
                 try:
                     with engine.begin() as conn:
-                        conn.execute(text("INSERT INTO motivos (motivo) VALUES (:m)"), {"m": novo_mot.strip()})
+                        conn.execute(text("INSERT INTO motivos (motivo) VALUES (:m) ON CONFLICT (motivo) DO NOTHING"), {"m": novo_mot.strip()})
+                    st.cache_data.clear()
                     st.success("Motivo salvo!")
                     st.rerun()
                 except Exception as e:
@@ -611,11 +634,13 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
             st.write("Atuais:", lista_motivos)
 
     with aba_limpar:
-        st.warning("Apaga todas as ocorrências da nuvem.")
-        if st.button("🗑️ Zerar Ocorrências na Nuvem") and engine:
+        st.markdown('<div class="titulo-secao">🧹 Limpeza de Base</div>', unsafe_allow_html=True)
+        st.warning("Atenção: Esta ação apaga todas as ocorrências cadastradas na nuvem.")
+        if st.button("🗑️ Zerar Ocorrências na Nuvem", key="btn_zerar_nuvem") and engine:
             try:
                 with engine.begin() as conn:
                     conn.execute(text("DELETE FROM ocorrencias"))
+                st.cache_data.clear()
                 st.success("✅ Ocorrências zeradas no banco!")
                 st.rerun()
             except Exception as e:
