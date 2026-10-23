@@ -471,7 +471,7 @@ if pagina == "📊 Dashboard & Cadências":
         </div>""", unsafe_allow_html=True)
     with k5:
         qtd_rv_conf = len(df_filtrado[df_filtrado["Status"] == "Validado (Impacta RV)"]) if not df_filtrado.empty else 0
-         qtd_op_conf = len(df_filtrado[df_filtrado["Status"] == "Validado (Operacional Sem Impacto RV)"]) if not df_filtrado.empty else 0
+        qtd_op_conf = len(df_filtrado[df_filtrado["Status"] == "Validado (Operacional Sem Impacto RV)"]) if not df_filtrado.empty else 0
         st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #10B981;">
             <div class="kpi-title">⚖️ Ações Tratadas Gestor</div>
             <div class="kpi-value">{qtd_rv_conf + qtd_op_conf + qtd_abonadas}</div>
@@ -905,7 +905,7 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
                     df_b_view.apply(lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']})", axis=1).tolist(),
                     key="sel_reabrir_id"
                 )
-                id_ alvo = int(id_gerenciar.split("#")[1].split(" -")[0])
+                id_alvo = int(id_gerenciar.split("#")[1].split(" -")[0])
                 b_reab, b_excl = st.columns(2)
                 if b_reab.button("↩️ Devolver para Pendente", use_container_width=True):
                     with engine.begin() as conn:
