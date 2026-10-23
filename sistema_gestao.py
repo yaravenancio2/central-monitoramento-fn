@@ -149,6 +149,18 @@ def get_engine():
 engine = get_engine()
 
 # ================= 2. CONTROLE DE AUTENTICAÇÃO (LOGIN SEGURO) =================
+usuarios_cadastrados = {
+    "Cheila": "torre123",
+    "Caroline": "torre123",
+    "Gleidiene (Manutenção)": "manut123",
+    "Breno (Manutenção)": "manut123",
+    "Rennan": "gestao123",
+    "Tiago": "gestao123",
+    "Kennia": "gestao123",
+    "Yara": "gestao123",
+    "Diretoria": "dir123"
+}
+
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
     st.session_state["usuario"] = None
@@ -162,34 +174,21 @@ if not st.session_state["autenticado"]:
         with st.form("form_login_seguro"):
             user_escolhido = st.selectbox(
                 "Selecionar Usuário:", 
-                ["Caroline", "Cheila", "Yara", "Kennia", "Tiago", "Gleidiene (Manutenção)", "Rennan", "Breno (Manutenção)"]
+                list(usuarios_cadastrados.keys())
             )
             senha_digitada = st.text_input("Senha de Acesso:", type="password")
             submitted = st.form_submit_button("Entrar no Sistema", use_container_width=True, type="primary")
             
             if submitted:
-                # Dicionário de senhas dos usuários
-                senhas_cadastradas = {
-                    "Cheila": "torre123",
-                    "Caroline": "torre123",
-                    "Gleidiene (Manutenção)": "manut123",
-                    "Breno (Manutenção)": "manut123",
-                    "Rennan": "gestao123"
-                    "Tiago": "gestao123"
-                    "Kennia": "gestao123"
-                    "Yara": "gestao123"
-                }
-                
-                if senha_digitada == senhas_cadastradas.get(user_escolhido):
+                if senha_digitada == usuarios_cadastrados.get(user_escolhido):
                     st.session_state["autenticado"] = True
                     st.session_state["usuario"] = user_escolhido
                     st.success("Login realizado com sucesso!")
                     st.rerun()
                 else:
                     st.error("❌ Senha incorreta. Tente novamente.")
-    st.stop() # Interrompe a execução do app até que o login seja efetuado
+    st.stop()
 
-# Recupera o usuário logado com segurança na sessão
 usuario_logado = st.session_state["usuario"]
 
 # ================= 3. FUNÇÕES DE LEITURA EM CACHE =================
@@ -696,7 +695,8 @@ if pagina == "📊 Dashboard & Cadências":
 # PÁGINA 2: REGISTRAR OCORRÊNCIA (TORRE / MANUTENÇÃO TRAVADA)
 # ==============================================================================
 elif pagina == "🚨 Registrar Ocorrência (Torre / Manutenção)":
-    is_manutencao = "Manutenção" in usuario_logado
+    # Identifica se o usuário logado é da Manutenção (Breno ou Gleidiene)
+    is_manutencao = ("Manutenção" in usuario_logado)
 
     if is_manutencao:
         st.markdown(f"## 🔧 Novo Apontamento - Manutenção ({usuario_logado})")
