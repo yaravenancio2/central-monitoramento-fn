@@ -3,62 +3,161 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
-import os
 from sqlalchemy import create_engine, text
+import base64
+import io
 
-st.set_page_config(page_title="Central de Monitoramento | FN Distribuidora", page_icon="🚚", layout="wide")
+# Tenta importar Pillow para compressão automática de imagens anexadas
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
-# ================= ESTILIZAÇÃO VISUAL =================
+# ================= CONFIGURAÇÃO DA PÁGINA =================
+st.set_page_config(
+    page_title="Central de Monitoramento & RV - FN Distribuidora",
+    page_icon="🚛",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+VALOR_BASE_RV = 250.0
+
+# ================= ESTILO VISUAL (DARK EXECUTIVE) =================
 st.markdown("""
-    <style>
-    .stApp { background-color: #0b0f19; color: #f0f2f6; }
-    [data-testid="stSidebar"] { background-color: #0b1c2c; border-right: 2px solid #1261A3; }
-    .stButton>button {
-        background-color: #F5A623 !important; color: #000000 !important;
-        font-weight: bold !important; border: none !important; border-radius: 6px !important;
+<style>
+    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+    .kpi-card {
+        background: linear-gradient(145deg, #1e293b, #0f172a);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+        margin-bottom: 10px;
     }
-    .stButton>button:hover { background-color: #e0961b !important; color: white !important; }
-    div[data-testid="metric-container"] {
-        background: linear-gradient(145deg, #121826, #1a2333);
-        border-top: 3px solid #1261A3; padding: 15px 20px; border-radius: 8px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-    }
+    .kpi-title { font-size: 0.82rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .kpi-value { font-size: 1.75rem; font-weight: 800; color: #f8fafc; margin: 6px 0; }
+    .kpi-sub { font-size: 0.78rem; color: #cbd5e1; }
     .titulo-secao {
-        font-size: 18px; font-weight: 600; color: #e2e8f0;
-        margin-top: 15px; margin-bottom: 15px; border-left: 4px solid #F5A623; padding-left: 10px;
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: #f8fafc;
+        background: #1e293b;
+        padding: 10px 15px;
+        border-left: 5px solid #3b82f6;
+        border-radius: 6px;
+        margin: 15px 0 12px 0;
     }
-    .card-ocorrencia { background-color: #161e2e; border-left: 5px solid #ef4444; padding: 15px; border-radius: 6px; margin-bottom: 12px; }
-    .card-positivo { background-color: #161e2e; border-left: 5px solid #10b981; padding: 15px; border-radius: 6px; margin-bottom: 12px; }
-    .badge-funcao { background-color: #1261A3; color: white; padding: 6px 14px; border-radius: 6px; font-weight: bold; display: inline-block; margin-top: 28px; }
-    </style>
+</style>
 """, unsafe_allow_html=True)
 
-ARQUIVO_LOGO = "logo_fn.jpg"
-# ================= 1. CONEXÃO DE ALTA PERFORMANCE COM POOLING =================
+# ================= 1. CONEXÃO DE ALTA PERFORMANCE COM AUTO-MIGRAÇÃO =================
+MOTIVOS_OFICIAIS_PADRAO = [
+    # INCIDÊNCIAS QUE AFETAM A VARIÁVEL (R$ 250,00)
+    {"motivo": "FALTA COLABORADOR", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "ADVERTÊNCIA", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "SINISTRO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "MULTA DE TRÂNSITO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "DEVOLUÇÃO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "PENDÊNCIA", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "ACERTO CORRETO", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "CHECKLIST DIÁRIO (SAÍDA)", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "ROTEIRIZADOR (BAIXAS, CANHOTOS, CHECK IN E CHECK OUT)", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "REGISTRO JORNADA E SOLIDES", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "CHECK LIST HIGIENIZAÇÃO (RETORNO)", "prioridade": "Baixa", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "DEVOLUÇÃO DOS PALETES", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    # MOTIVOS OPERACIONAIS / COMPORTAMENTAIS (NÃO AFETAM A VARIÁVEL, MAS ENTRAM NO DOSSIÊ E CADÊNCIA)
+    {"motivo": "ATRASO NA SAÍDA / HORÁRIO LIMITE NO CLIENTE", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
+    {"motivo": "POSTURA INADEQUADA NO CLIENTE OU COM A TORRE", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
+    {"motivo": "NÃO SEGUIU ROTA PLANEJADA", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
+    {"motivo": "DIFICULDADE OPERACIONAL EM ROTA", "prioridade": "Baixa", "impacta_rv": "Não", "p1": 0, "p2": 0},
+    {"motivo": "AÇÃO POSITIVA / ELOGIO OPERACIONAL", "prioridade": "Positivo", "impacta_rv": "Não", "p1": 0, "p2": 0}
+]
+
 @st.cache_resource
 def get_engine():
     try:
         db_url = "postgresql://neondb_owner:npg_lIF7viVRP1wr@ep-calm-glitter-b6dn9ffv-pooler.c-2.sa-east-1.aws.neon.tech/neondb?sslmode=require"
-        return create_engine(
+        eng = create_engine(
             db_url,
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
             pool_recycle=300
         )
+        with eng.begin() as conn:
+            # Garante tabelas principais
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS colaboradores (
+                    id SERIAL PRIMARY KEY,
+                    colaborador VARCHAR(255) UNIQUE NOT NULL,
+                    funcao VARCHAR(50) NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS motivos (
+                    id SERIAL PRIMARY KEY,
+                    motivo TEXT UNIQUE NOT NULL,
+                    prioridade VARCHAR(30) DEFAULT 'Média',
+                    impacta_rv VARCHAR(10) DEFAULT 'Não',
+                    perda_1_ocorr INT DEFAULT 0,
+                    perda_2_ou_mais INT DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS ocorrencias (
+                    id INT PRIMARY KEY,
+                    data VARCHAR(50),
+                    colaborador VARCHAR(255),
+                    funcao VARCHAR(50),
+                    rota VARCHAR(255),
+                    tipo VARCHAR(255),
+                    motivo TEXT,
+                    detalhe TEXT,
+                    pontos INT DEFAULT 0,
+                    status VARCHAR(100),
+                    acao_gestor TEXT,
+                    data_tratativa VARCHAR(50),
+                    registrado_por VARCHAR(100),
+                    prioridade VARCHAR(30) DEFAULT 'Média',
+                    impacta_rv VARCHAR(10) DEFAULT 'Não',
+                    tem_anexo VARCHAR(10) DEFAULT 'Não'
+                );
+                CREATE TABLE IF NOT EXISTS ocorrencias_anexos (
+                    id_ocorrencia INT PRIMARY KEY,
+                    nome_arquivo VARCHAR(255),
+                    tipo_mime VARCHAR(100),
+                    dados_base64 TEXT
+                );
+            """))
+            # Auto-migração para tabelas já existentes
+            conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS prioridade VARCHAR(30) DEFAULT 'Média'"))
+            conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS impacta_rv VARCHAR(10) DEFAULT 'Não'"))
+            conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS perda_1_ocorr INT DEFAULT 0"))
+            conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS perda_2_ou_mais INT DEFAULT 0"))
+
+            conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS prioridade VARCHAR(30) DEFAULT 'Média'"))
+            conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS impacta_rv VARCHAR(10) DEFAULT 'Não'"))
+            conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS tem_anexo VARCHAR(10) DEFAULT 'Não'"))
+
+            # Garante que os 12 motivos oficiais da variável existam no banco
+            for m in MOTIVOS_OFICIAIS_PADRAO:
+                conn.execute(text("""
+                    INSERT INTO motivos (motivo, prioridade, impacta_rv, perda_1_ocorr, perda_2_ou_mais)
+                    VALUES (:m, :pr, :rv, :p1, :p2)
+                    ON CONFLICT (motivo) DO NOTHING
+                """), {"m": m["motivo"], "pr": m["prioridade"], "rv": m["impacta_rv"], "p1": m["p1"], "p2": m["p2"]})
+        return eng
     except Exception as e:
         st.error(f"Erro ao conectar com o banco de dados PostgreSQL: {e}")
         return None
 
 engine = get_engine()
 
-# ================= 2. LEITURA EM CACHE (ZERO LATÊNCIA NOS CLIQUES) =================
+# ================= 2. FUNÇÕES DE LEITURA EM CACHE =================
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_colaboradores():
     if engine:
         try:
-            query = "SELECT colaborador, funcao FROM colaboradores ORDER BY colaborador"
-            df_c = pd.read_sql(query, engine)
+            df_c = pd.read_sql("SELECT colaborador, funcao FROM colaboradores ORDER BY colaborador", engine)
             if not df_c.empty:
                 df_c.columns = ["Colaborador", "Funcao"]
                 return df_c
@@ -67,486 +166,965 @@ def carregar_colaboradores():
     return pd.DataFrame([{"Colaborador": "Carlos Eduardo", "Funcao": "Motorista"}])
 
 @st.cache_data(ttl=300, show_spinner=False)
-def carregar_naturezas():
-    if engine:
-        try:
-            query = "SELECT natureza FROM naturezas ORDER BY id"
-            df_n = pd.read_sql(query, engine)
-            if not df_n.empty:
-                return df_n["natureza"].tolist()
-        except Exception:
-            pass
-    return ["Negligência Grave", "Devolução por Falha", "Comportamental", "Dificuldade Operacional", "Ação Positiva (Elogio)"]
-
-@st.cache_data(ttl=300, show_spinner=False)
-def carregar_motivos():
-    if engine:
-        try:
-            query = "SELECT motivo FROM motivos ORDER BY id"
-            df_m = pd.read_sql(query, engine)
-            if not df_m.empty:
-                return df_m["motivo"].tolist()
-        except Exception:
-            pass
-    return [
-        "Voltou com devolução sem acionar a Torre",
-        "Falta de conferência (Avaria / Falta de mercadoria)",
-        "Atraso na saída / Horário limite perdido no cliente",
-        "Postura inadequada no cliente ou com a Torre",
-        "Erro de manuseio no App (maxMotorista)",
-        "Não seguiu rota planejada",
-        "Otimização de processo / Salvou entrega difícil",
-        "Outros"
-    ]
-
-@st.cache_data(ttl=60, show_spinner=False)
-def carregar_dados():
+def carregar_df_motivos():
     if engine:
         try:
             query = """
-                SELECT id, data, colaborador, funcao, rota, tipo, motivo, 
-                       detalhe, pontos, status, acao_gestor, data_tratativa, registrado_por 
-                FROM ocorrencias 
+                SELECT motivo, 
+                       COALESCE(prioridade, 'Média') AS prioridade, 
+                       COALESCE(impacta_rv, 'Não') AS impacta_rv,
+                       COALESCE(perda_1_ocorr, 0) AS perda_1_ocorr,
+                       COALESCE(perda_2_ou_mais, 0) AS perda_2_ou_mais
+                FROM motivos 
+                ORDER BY impacta_rv DESC, prioridade ASC, motivo ASC
+            """
+            df_m = pd.read_sql(query, engine)
+            if not df_m.empty:
+                df_m.columns = ["Motivo", "Prioridade", "Impacta_RV", "Perda_1_Ocorr_%", "Perda_2_Mais_%"]
+                return df_m
+        except Exception:
+            pass
+    df_pad = pd.DataFrame(MOTIVOS_OFICIAIS_PADRAO)
+    df_pad.columns = ["Motivo", "Prioridade", "Impacta_RV", "Perda_1_Ocorr_%", "Perda_2_Mais_%"]
+    return df_pad
+
+@st.cache_data(ttl=60, show_spinner=False)
+def carregar_dados():
+    colunas = [
+        "ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe",
+        "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por", "Prioridade", "Impacta_RV", "Tem_Anexo"
+    ]
+    if engine:
+        try:
+            query = """
+                SELECT id, data, colaborador, funcao, rota, tipo, motivo, detalhe,
+                       status, acao_gestor, data_tratativa, COALESCE(registrado_por, 'Torre') AS registrado_por,
+                       COALESCE(prioridade, tipo, 'Média') AS prioridade,
+                       COALESCE(impacta_rv, 'Não') AS impacta_rv,
+                       COALESCE(tem_anexo, 'Não') AS tem_anexo
+                FROM ocorrencias
                 ORDER BY id DESC
             """
             df_o = pd.read_sql(query, engine)
-            df_o.columns = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
-            return df_o
+            if not df_o.empty:
+                df_o.columns = colunas
+                # Padroniza prioridades antigas caso existam registros legados
+                mapa_legado = {
+                    "Negligência Grave": "Alta",
+                    "Devolução por Falha": "Alta",
+                    "Comportamental": "Média",
+                    "Dificuldade Operacional": "Baixa",
+                    "Ação Positiva (Elogio)": "Positivo"
+                }
+                df_o["Prioridade"] = df_o["Prioridade"].replace(mapa_legado)
+                df_o["Prioridade"] = df_o["Prioridade"].apply(lambda x: x if x in ["Alta", "Média", "Baixa", "Positivo"] else "Média")
+                return df_o
         except Exception:
             pass
-    
-    colunas = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
     return pd.DataFrame(columns=colunas)
 
-# Inicializa os dados na memória
-df_colab = carregar_colaboradores()
-lista_naturezas = carregar_naturezas()
-lista_motivos = carregar_motivos()
-df = carregar_dados()
-if "Registrado_Por" not in df.columns and not df.empty:
-    df["Registrado_Por"] = "Torre"
+# ================= 3. FUNÇÕES AUXILIARES (ANEXOS LEVES E CÁLCULO DE RV) =================
+def comprimir_e_codificar_arquivo(uploaded_file):
+    """Comprime imagens automaticamente para ~40KB no banco ou limita PDFs leves."""
+    if uploaded_file is None:
+        return None, None, None
+    nome = uploaded_file.name
+    mime = uploaded_file.type
+    bytes_brutos = uploaded_file.getvalue()
 
-# Inicializa os dados na memória (O QUE ESTAVA FALTANDO)
-df_colab = carregar_colaboradores()
-lista_naturezas = carregar_naturezas()
-lista_motivos = carregar_motivos()
-df = carregar_dados()
-if "Registrado_Por" not in df.columns and not df.empty:
-    df["Registrado_Por"] = "Torre"
+    if HAS_PIL and mime.startswith("image/"):
+        try:
+            img = Image.open(io.BytesIO(bytes_brutos))
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            img.thumbnail((1200, 1200))
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=70, optimize=True)
+            bytes_finais = buffer.getvalue()
+            mime = "image/jpeg"
+            if not nome.lower().endswith(".jpg"):
+                nome = nome.rsplit(".", 1)[0] + ".jpg"
+        except Exception:
+            bytes_finais = bytes_brutos
+    else:
+        if len(bytes_brutos) > 1024 * 1024:  # Limite de 1MB para PDFs
+            return "ERRO_TAMANHO", None, None
+        bytes_finais = bytes_brutos
 
-# ================= CONTROLE DE ACESSO (LOGIN) =================
-USUARIOS = {
-    "cheila": {"senha": "123", "perfil": "operacao", "nome": "Cheila"},
-    "caroline": {"senha": "123", "perfil": "operacao", "nome": "Caroline"},
-    "sonale": {"senha": "123", "perfil": "operacao", "nome": "Sonale"},
-    "melissa": {"senha": "123", "perfil": "operacao", "nome": "Melissa"},
-    "lucas": {"senha": "123", "perfil": "operacao", "nome": "Lucas Silva"},
-    "yara": {"senha": "123", "perfil": "gestao", "nome": "Yara Venancio"},
-    "rennan": {"senha": "456", "perfil": "gestao", "nome": "Rennan"},
-    "tiago": {"senha": "456", "perfil": "gestao", "nome": "Tiago"},
-    "kennia": {"senha": "456", "perfil": "gestao", "nome": "Kennia"},
-    "diretoria": {"senha": "789", "perfil": "leitura", "nome": "Diretoria (Resultados)"}
+    b64_str = base64.b64encode(bytes_finais).decode("utf-8")
+    return nome, mime, b64_str
+
+def buscar_anexo_no_banco(id_ocorr):
+    if engine:
+        try:
+            df_a = pd.read_sql(text("SELECT nome_arquivo, tipo_mime, dados_base64 FROM ocorrencias_anexos WHERE id_ocorrencia = :id"), engine, params={"id": int(id_ocorr)})
+            if not df_a.empty:
+                return df_a.iloc[0]["nome_arquivo"], df_a.iloc[0]["tipo_mime"], df_a.iloc[0]["dados_base64"]
+        except Exception:
+            pass
+    return None, None, None
+
+def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos):
+    """
+    Calcula o Laudo de Remuneração Variável (R$ 250,00) para todos os colaboradores.
+    Apenas ocorrências com Status == 'Validado (Impacta RV)' entram no desconto financeiro.
+    """
+    regras_dict = {}
+    for _, r in df_regras_motivos.iterrows():
+        regras_dict[r["Motivo"]] = {
+            "impacta": r["Impacta_RV"],
+            "p1": int(r["Perda_1_Ocorr_%"]),
+            "p2": int(r["Perda_2_Mais_%"])
+        }
+
+    # Filtra apenas ocorrências validadas pelo gestor que impactam RV
+    if not df_ocorr_periodo.empty:
+        df_rv_validas = df_ocorr_periodo[df_ocorr_periodo["Status"] == "Validado (Impacta RV)"].copy()
+        df_pendentes = df_ocorr_periodo[
+            (df_ocorr_periodo["Status"] == "Pendente de Validação") &
+            (df_ocorr_periodo["Impacta_RV"] == "Sim")
+        ]
+        df_abonadas = df_ocorr_periodo[df_ocorr_periodo["Status"] == "Justificado / Abonado"]
+    else:
+        df_rv_validas = pd.DataFrame()
+        df_pendentes = pd.DataFrame()
+        df_abonadas = pd.DataFrame()
+
+    resultado = []
+    lista_efetivo = df_colaboradores.to_dict("records") if not df_colaboradores.empty else []
+
+    for colab_info in lista_efetivo:
+        nome = colab_info["Colaborador"]
+        funcao = colab_info["Funcao"]
+
+        ocorr_colab = df_rv_validas[df_rv_validas["Colaborador"] == nome] if not df_rv_validas.empty else pd.DataFrame()
+        pend_colab = len(df_pendentes[df_pendentes["Colaborador"] == nome]) if not df_pendentes.empty else 0
+        abon_colab = len(df_abonadas[df_abonadas["Colaborador"] == nome]) if not df_abonadas.empty else 0
+
+        perda_pct_total = 0
+        detalhes_motivos = []
+
+        if not ocorr_colab.empty:
+            contagem_por_motivo = ocorr_colab["Motivo"].value_counts().to_dict()
+            for mot, qtd in contagem_por_motivo.items():
+                regra = regras_dict.get(mot, {"impacta": "Sim", "p1": 20, "p2": 100})
+                if qtd == 1:
+                    perda_mot = regra["p1"]
+                else:
+                    perda_mot = regra["p2"]
+                perda_pct_total += perda_mot
+                detalhes_motivos.append(f"{mot} ({qtd}x -> -{perda_mot}%)")
+
+        perda_pct_final = min(100, perda_pct_total)
+        valor_desconto = round(VALOR_BASE_RV * (perda_pct_final / 100.0), 2)
+        valor_receber = round(VALOR_BASE_RV - valor_desconto, 2)
+
+        if perda_pct_final == 0:
+            status_rv = "🟢 100% Elegível (R$ 250)"
+        elif perda_pct_final < 100:
+            status_rv = f"🟡 Parcial (-{perda_pct_final}%)"
+        else:
+            status_rv = "🔴 Perda Total (R$ 0)"
+
+        resultado.append({
+            "Colaborador": nome,
+            "Função": funcao,
+            "Ocorrências RV (Validadas)": len(ocorr_colab),
+            "Abonadas / Justificadas": abon_colab,
+            "Pendentes Análise": pend_colab,
+            "Detalhamento de Incidências RV": " | ".join(detalhes_motivos) if detalhes_motivos else "Nenhuma incidência validada",
+            "% Perda RV": perda_pct_final,
+            "Valor Base (R$)": VALOR_BASE_RV,
+            "Desconto (R$)": valor_desconto,
+            "Valor a Pagar (R$)": valor_receber,
+            "Status Elegibilidade": status_rv
+        })
+
+    return pd.DataFrame(resultado)
+
+# ================= INICIALIZAÇÃO DOS DADOS NA MEMÓRIA =================
+df_colab = carregar_colaboradores()
+df_motivos = carregar_df_motivos()
+lista_motivos = df_motivos["Motivo"].tolist()
+mapa_prioridade_motivo = dict(zip(df_motivos["Motivo"], df_motivos["Prioridade"]))
+mapa_rv_motivo = dict(zip(df_motivos["Motivo"], df_motivos["Impacta_RV"]))
+
+df = carregar_dados()
+
+# Converte datas de forma segura para filtros e gráficos de cadência
+if not df.empty:
+    df["Data_DT"] = pd.to_datetime(df["Data"], dayfirst=True, errors="coerce")
+    # Caso alguma data esteja em formato YYYY-MM-DD
+    mask_na = df["Data_DT"].isna()
+    if mask_na.any():
+        df.loc[mask_na, "Data_DT"] = pd.to_datetime(df.loc[mask_na, "Data"], errors="coerce")
+else:
+    df["Data_DT"] = pd.Series(dtype="datetime64[ns]")
+
+# ================= BARRA LATERAL (NAVEGAÇÃO E FILTROS GLOBAIS) =================
+st.sidebar.markdown("## 🚛 Central FN Distribuidora")
+st.sidebar.caption("Gestão de Prioridades, Tratativas & Remuneração Variável")
+
+pagina = st.sidebar.radio(
+    "Navegação do Sistema:",
+    [
+        "📊 Dashboard & Cadências",
+        "🚨 Registrar Ocorrência (Torre)",
+        "⚖️ Mesa do Gestor & Backlog",
+        "💰 Laudo Remuneração Variável",
+        "📁 Dossiê 360º do Colaborador",
+        "👥 Equipe & Parâmetros"
+    ]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔍 Filtros Globais")
+funcao_filtro = st.sidebar.multiselect(
+    "Filtrar Função:",
+    options=["Motorista", "Ajudante"],
+    default=["Motorista", "Ajudante"]
+)
+
+# Filtro de Período Global
+hoje = date.today()
+inicio_mes = date(hoje.year, hoje.month, 1)
+usar_filtro_data = st.sidebar.checkbox("Filtrar por Período", value=False)
+if usar_filtro_data:
+    col_d1, col_d2 = st.sidebar.columns(2)
+    dt_ini = col_d1.date_input("Início:", value=inicio_mes)
+    dt_fim = col_d2.date_input("Fim:", value=hoje)
+else:
+    dt_ini, dt_fim = None, None
+
+# Aplica filtros ao DataFrame principal
+df_filtrado = df[df["Funcao"].isin(funcao_filtro)].copy() if not df.empty else df.copy()
+if usar_filtro_data and not df_filtrado.empty and df_filtrado["Data_DT"].notna().any():
+    df_filtrado = df_filtrado[
+        (df_filtrado["Data_DT"].dt.date >= dt_ini) &
+        (df_filtrado["Data_DT"].dt.date <= dt_fim)
+    ]
+
+CORES_PRIORIDADE = {
+    "Alta": "#EF4444",
+    "Média": "#F59E0B",
+    "Baixa": "#3B82F6",
+    "Positivo": "#10B981"
 }
 
-if "logado" not in st.session_state:
-    st.session_state["logado"] = False
-    st.session_state["perfil"] = ""
-    st.session_state["nome_usuario"] = ""
+# ==============================================================================
+# PÁGINA 1: DASHBOARD EXECUTIVO, % DE PRIORIDADES & GRÁFICOS DE CADÊNCIA
+# ==============================================================================
+if pagina == "📊 Dashboard & Cadências":
+    st.markdown("## 📊 Painel Executivo: Prioridades, Tratativas & Cadências")
 
-if not st.session_state["logado"]:
-    col1, col2, col3 = st.columns([3, 4, 3])
-    with col2:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        if os.path.exists(ARQUIVO_LOGO):
-            st.image(ARQUIVO_LOGO, use_container_width=True)
-        st.markdown('<h2 style="text-align:center; color:#e2e8f0;">CENTRAL DE MONITORAMENTO</h2>', unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center; color:#94a3b8; margin-bottom:20px;">Acesso Restrito - FN Distribuidora</p>', unsafe_allow_html=True)
-        
-        with st.form("form_login"):
-            usuario = st.text_input("Usuário").strip().lower()
-            senha = st.text_input("Senha", type="password")
-            entrar = st.form_submit_button("Entrar no Sistema", use_container_width=True)
-            
-            if entrar:
-                if usuario in USUARIOS and USUARIOS[usuario]["senha"] == senha:
-                    st.session_state["logado"] = True
-                    st.session_state["perfil"] = USUARIOS[usuario]["perfil"]
-                    st.session_state["nome_usuario"] = USUARIOS[usuario]["nome"]
-                    st.rerun()
-                else:
-                    st.error("Usuário ou senha incorretos.")
-    st.stop()
-
-# ================= MENU LATERAL =================
-with st.sidebar:
-    if os.path.exists(ARQUIVO_LOGO):
-        st.image(ARQUIVO_LOGO, use_container_width=True)
+    # Separa ocorrências validadas (que contam para % Alta/Média/Baixa) das pendentes e abonadas
+    if not df_filtrado.empty:
+        df_validadas = df_filtrado[df_filtrado["Status"].isin([
+            "Validado (Impacta RV)",
+            "Validado (Operacional Sem Impacto RV)",
+            "Concluído", "Tratado"
+        ])].copy()
+        qtd_pendentes = len(df_filtrado[df_filtrado["Status"] == "Pendente de Validação"])
+        qtd_abonadas = len(df_filtrado[df_filtrado["Status"] == "Justificado / Abonado"])
     else:
-        st.markdown("## 🚚 **CENTRAL FN**")
-        
-    st.caption(f"👤 Logado como: **{st.session_state['nome_usuario']}**")
-    if st.button("Sair / Logout", use_container_width=True):
-        st.session_state["logado"] = False
-        st.rerun()
-        
-    st.divider()
-    
-    if st.session_state["perfil"] == "gestao":
-        paginas_disponiveis = [
-            "📊 Dashboard Executivo (Visão Geral)", 
-            "👤 Prontuário Individual (1 a 80)", 
-            "⚡ Central de Tratativas (Gestor)", 
-            "➕ Registrar Ocorrência (Torre)",
-            "👥 Cadastrar Equipe & Parâmetros"
-        ]
-    elif st.session_state["perfil"] == "operacao":
-        paginas_disponiveis = ["➕ Registrar Ocorrência (Torre)"]
-    else:
-        paginas_disponiveis = ["📊 Dashboard Executivo (Visão Geral)"]
+        df_validadas = pd.DataFrame()
+        qtd_pendentes = 0
+        qtd_abonadas = 0
 
-    pagina = st.radio("MÓDULOS DO SISTEMA", paginas_disponiveis)
-    st.divider()
-    funcao_filtro = st.multiselect("Filtrar Função:", ["Motorista", "Ajudante"], default=["Motorista", "Ajudante"])
-    df_filtrado = df[df["Funcao"].isin(funcao_filtro)] if not df.empty else df
+    # Cálculo das % de Prioridade sobre as ocorrências validadas negativas (Alta, Média, Baixa)
+    df_prio_neg = df_validadas[df_validadas["Prioridade"].isin(["Alta", "Média", "Baixa"])] if not df_validadas.empty else pd.DataFrame()
+    total_prio = len(df_prio_neg)
 
-# ================= PÁGINA 1: DASHBOARD EXECUTIVO =================
-if pagina == "📊 Dashboard Executivo (Visão Geral)":
-    st.markdown("## 📊 Visão Executiva: Monitoramento de Performance e Devoluções")
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    pendentes = len(df_filtrado[df_filtrado["Status"] == "Pendente"]) if not df_filtrado.empty else 0
-    negligencias = len(df_filtrado[df_filtrado["Tipo"] == "Negligência Grave"]) if not df_filtrado.empty else 0
-    devolucoes = len(df_filtrado[df_filtrado["Tipo"] == "Devolução por Falha"]) if not df_filtrado.empty else 0
-    comportamental = len(df_filtrado[df_filtrado["Tipo"].isin(["Comportamental", "Dificuldade Operacional"])]) if not df_filtrado.empty else 0
-    elogios = len(df_filtrado[df_filtrado["Tipo"] == "Ação Positiva (Elogio)"]) if not df_filtrado.empty else 0
-    
-    col1.metric("🔴 Pendentes Gestor", f"{pendentes} casos")
-    col2.metric("⚠️ Negligências Graves", f"{negligencias} reg.")
-    col3.metric("📦 Devoluções (Equipe)", f"{devolucoes} ocorr.")
-    col4.metric("🗣️ Comportamento/App", f"{comportamental} ocorr.")
-    col5.metric("🟢 Ações Positivas", f"{elogios} elogios")
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    aba_ranking, aba_torre, aba_gestor, aba_cruzamento = st.tabs([
-        "🎯 1. Ranking & Pontos Acumulados", 
-        "📋 2. Registros da Torre (Fatos)", 
-        "👔 3. Retorno da Gestão (Tratativas)",
-        "📈 4. Análise Gráfica & Linha do Tempo"
-    ])
-    
-    with aba_ranking:
-        st.markdown('<div class="titulo-secao">🚨 Matriz de Pontuação Acumulada por Colaborador</div>', unsafe_allow_html=True)
-        if not df_filtrado.empty:
-            resumo_colab = df_filtrado.groupby(["Colaborador", "Funcao"]).agg(
-                Score_Acumulado=("Pontos", "sum"),
-                Total_Negligencias=("Tipo", lambda x: (x == "Negligência Grave").sum()),
-                Total_Devolucoes=("Tipo", lambda x: (x == "Devolução por Falha").sum()),
-                Total_Comportamental=("Tipo", lambda x: x.isin(["Comportamental", "Dificuldade Operacional"]).sum()),
-                Total_Elogios=("Tipo", lambda x: (x == "Ação Positiva (Elogio)").sum()),
-                Casos_Tratar=("Status", lambda x: (x == "Pendente").sum()),
-                Casos_Resolvidos=("Status", lambda x: (x != "Pendente").sum())
-            ).reset_index().sort_values(by="Score_Acumulado", ascending=False)
-            
-            def definir_alerta(pts):
-                if pts >= 8: return "🔴 CRÍTICO (Advertência)"
-                elif pts >= 4: return "🟡 ATENÇÃO (Feedback)"
-                elif pts > 0: return "🔵 MONITORAR"
-                else: return "🟢 DESTAQUE / REGULAR"
-                
-            resumo_colab["Situação Atual"] = resumo_colab["Score_Acumulado"].apply(definir_alerta)
-            resumo_colab = resumo_colab[[
-                "Colaborador", "Funcao", "Situação Atual", "Score_Acumulado", 
-                "Total_Negligencias", "Total_Devolucoes", "Total_Comportamental", 
-                "Total_Elogios", "Casos_Tratar", "Casos_Resolvidos"
-            ]]
-            
-            st.dataframe(
-                resumo_colab,
-                column_config={
-                    "Score_Acumulado": st.column_config.ProgressColumn("Pontos Acumulados", format="%d pts", min_value=-5, max_value=15),
-                    "Total_Negligencias": st.column_config.NumberColumn("Negligências (+5)", format="%d ⚠️"),
-                    "Total_Devolucoes": st.column_config.NumberColumn("Devoluções (+3)", format="%d 📦"),
-                    "Total_Comportamental": st.column_config.NumberColumn("Comport./App (+2/+1)", format="%d 🗣️"),
-                    "Total_Elogios": st.column_config.NumberColumn("Elogios (-3)", format="%d 🌟"),
-                    "Casos_Tratar": st.column_config.NumberColumn("Pendentes Gestor", format="%d 🔴"),
-                    "Casos_Resolvidos": st.column_config.NumberColumn("Já Tratados", format="%d ✔️")
-                },
-                use_container_width=True, hide_index=True
+    qtd_alta = len(df_prio_neg[df_prio_neg["Prioridade"] == "Alta"]) if total_prio > 0 else 0
+    qtd_media = len(df_prio_neg[df_prio_neg["Prioridade"] == "Média"]) if total_prio > 0 else 0
+    qtd_baixa = len(df_prio_neg[df_prio_neg["Prioridade"] == "Baixa"]) if total_prio > 0 else 0
+
+    pct_alta = (qtd_alta / total_prio * 100) if total_prio > 0 else 0.0
+    pct_media = (qtd_media / total_prio * 100) if total_prio > 0 else 0.0
+    pct_baixa = (qtd_baixa / total_prio * 100) if total_prio > 0 else 0.0
+
+    # --- FAIXA DE KPIS ---
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.markdown(f"""<div class="kpi-card">
+            <div class="kpi-title">Total Apontamentos</div>
+            <div class="kpi-value">{len(df_filtrado)}</div>
+            <div class="kpi-sub">⏳ {qtd_pendentes} Pendentes | 🛡️ {qtd_abonadas} Abonadas</div>
+        </div>""", unsafe_allow_html=True)
+    with k2:
+        st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #EF4444;">
+            <div class="kpi-title">🔴 % Prioridade Alta</div>
+            <div class="kpi-value" style="color:#EF4444;">{pct_alta:.1f}%</div>
+            <div class="kpi-sub">{qtd_alta} ocorrências validadas</div>
+        </div>""", unsafe_allow_html=True)
+    with k3:
+        st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #F59E0B;">
+            <div class="kpi-title">🟡 % Prioridade Média</div>
+            <div class="kpi-value" style="color:#F59E0B;">{pct_media:.1f}%</div>
+            <div class="kpi-sub">{qtd_media} ocorrências validadas</div>
+        </div>""", unsafe_allow_html=True)
+    with k4:
+        st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #3B82F6;">
+            <div class="kpi-title">🔵 % Prioridade Baixa</div>
+            <div class="kpi-value" style="color:#3B82F6;">{pct_baixa:.1f}%</div>
+            <div class="kpi-sub">{qtd_baixa} ocorrências validadas</div>
+        </div>""", unsafe_allow_html=True)
+    with k5:
+        qtd_rv_conf = len(df_filtrado[df_filtrado["Status"] == "Validado (Impacta RV)"]) if not df_filtrado.empty else 0
+         qtd_op_conf = len(df_filtrado[df_filtrado["Status"] == "Validado (Operacional Sem Impacto RV)"]) if not df_filtrado.empty else 0
+        st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #10B981;">
+            <div class="kpi-title">⚖️ Ações Tratadas Gestor</div>
+            <div class="kpi-value">{qtd_rv_conf + qtd_op_conf + qtd_abonadas}</div>
+            <div class="kpi-sub">💰 {qtd_rv_conf} Afetam RV | 📋 {qtd_op_conf} Sem RV</div>
+        </div>""", unsafe_allow_html=True)
+
+    # --- BLOCO 1: GRÁFICOS DE CADÊNCIA TEMPORAL (DIÁRIA / SEMANAL / MENSAL) ---
+    st.markdown('<div class="titulo-secao">📈 1. Análise de Cadência (Evolução de Prioridades e Tratativas no Tempo)</div>', unsafe_allow_html=True)
+    if not df_filtrado.empty and df_filtrado["Data_DT"].notna().any():
+        col_cad_op, _ = st.columns([2, 3])
+        agrupamento_tempo = col_cad_op.radio(
+            "Visão de Cadência:",
+            ["Diária", "Semanal", "Mensal"],
+            horizontal=True
+        )
+
+        df_cad = df_filtrado.dropna(subset=["Data_DT"]).copy()
+        if agrupamento_tempo == "Diária":
+            df_cad["Periodo"] = df_cad["Data_DT"].dt.strftime("%d/%m/%Y")
+            df_cad["Ordem"] = df_cad["Data_DT"].dt.date
+        elif agrupamento_tempo == "Semanal":
+            df_cad["Ordem"] = df_cad["Data_DT"].dt.to_period("W").apply(lambda r: r.start_time.date())
+            df_cad["Periodo"] = df_cad["Ordem"].apply(lambda d: f"Sem. {d.strftime('%d/%m')}")
+        else:
+            df_cad["Ordem"] = df_cad["Data_DT"].dt.to_period("M").apply(lambda r: r.start_time.date())
+            df_cad["Periodo"] = df_cad["Data_DT"].dt.strftime("%m/%Y")
+
+        g_cad1, g_cad2 = st.columns(2)
+
+        with g_cad1:
+            # Cadência por Nível de Prioridade
+            df_cad_prio = df_cad.groupby(["Ordem", "Periodo", "Prioridade"]).size().reset_index(name="Quantidade").sort_values("Ordem")
+            fig_cad_prio = px.bar(
+                df_cad_prio,
+                x="Periodo",
+                y="Quantidade",
+                color="Prioridade",
+                color_discrete_map=CORES_PRIORIDADE,
+                title=f"Cadência {agrupamento_tempo} por Nível de Prioridade",
+                text_auto=True,
+                barmode="stack"
             )
-        else:
-            st.info("Nenhuma ocorrência registrada na base ainda.")
+            fig_cad_prio.update_layout(template="plotly_dark", height=360, xaxis_title="Período", yaxis_title="Qtd Ocorrências")
+            st.plotly_chart(fig_cad_prio, use_container_width=True)
 
-    with aba_torre:
-        st.markdown('<div class="titulo-secao">📋 Diário de Bordo da Torre</div>', unsafe_allow_html=True)
-        if not df_filtrado.empty:
-            st.dataframe(df_filtrado[["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Registrado_Por"]].sort_values(by="ID", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.info("Sem registros.")
+        with g_cad2:
+            # Cadência de Tratativas do Gestor (Afeta RV vs Sem RV vs Abonadas vs Pendentes)
+            df_cad_status = df_cad.groupby(["Ordem", "Periodo", "Status"]).size().reset_index(name="Quantidade").sort_values("Ordem")
+            cores_status = {
+                "Validado (Impacta RV)": "#EF4444",
+                "Validado (Operacional Sem Impacto RV)": "#3B82F6",
+                "Justificado / Abonado": "#10B981",
+                "Pendente de Validação": "#94A3B8"
+            }
+            fig_cad_stat = px.line(
+                df_cad_status,
+                x="Periodo",
+                y="Quantidade",
+                color="Status",
+                color_discrete_map=cores_status,
+                markers=True,
+                title=f"Cadência {agrupamento_tempo} de Tratativas (Com RV vs Sem RV vs Abonadas)"
+            )
+            fig_cad_stat.update_traces(line=dict(width=3), marker=dict(size=8))
+            fig_cad_stat.update_layout(template="plotly_dark", height=360, xaxis_title="Período", yaxis_title="Qtd Registros")
+            st.plotly_chart(fig_cad_stat, use_container_width=True)
+    else:
+        st.info("Ainda não há dados no período selecionado para gerar os gráficos de cadência.")
 
-    with aba_gestor:
-        st.markdown('<div class="titulo-secao">👔 Controle de Tratativas da Gestão</div>', unsafe_allow_html=True)
-        if not df_filtrado.empty:
-            filtro_status_gestor = st.radio("Visualizar casos:", ["Todos os Casos", "Apenas Já Tratados pelo Gestor", "Apenas Pendentes de Ação"], horizontal=True)
-            df_aba_gestor = df_filtrado.copy()
-            if filtro_status_gestor == "Apenas Já Tratados pelo Gestor":
-                df_aba_gestor = df_aba_gestor[df_aba_gestor["Status"] != "Pendente"]
-            elif filtro_status_gestor == "Apenas Pendentes de Ação":
-                df_aba_gestor = df_aba_gestor[df_aba_gestor["Status"] == "Pendente"]
-            st.dataframe(df_aba_gestor[["ID", "Colaborador", "Funcao", "Data", "Motivo", "Status", "Acao_Gestor", "Data_Tratativa"]].sort_values(by="ID", ascending=False), use_container_width=True, hide_index=True)
-        else:
-            st.info("Sem registros.")
+    # --- BLOCO 2: MATRIZ DE % DOS MOTORISTAS FRENTE ÀS PRIORIDADES ---
+    st.markdown('<div class="titulo-secao">🎯 2. % dos Motoristas Frente às Prioridades (Alta, Média e Baixa)</div>', unsafe_allow_html=True)
+    if not df_prio_neg.empty:
+        modo_visao_mot = st.radio(
+            "Como deseja visualizar o gráfico de motoristas?",
+            ["📊 Proporção em % (100% Empilhado)", "🔢 Quantidade Absoluta de Ocorrências"],
+            horizontal=True
+        )
 
-    with aba_cruzamento:
-        st.markdown('<div class="titulo-secao">📈 Linha do Tempo e Evolução Geral da Operação</div>', unsafe_allow_html=True)
-        st.caption("Filtre por período, natureza ou motivo para analisar se a operação está melhorando ou piorando ao longo do tempo.")
-        
-        if not df_filtrado.empty:
-            c_f1, c_f2, c_f3 = st.columns(3)
-            df_filtrado["Data_Dt"] = pd.to_datetime(df_filtrado["Data"], errors="coerce")
-            min_data = df_filtrado["Data_Dt"].min().date() if not df_filtrado["Data_Dt"].isna().all() else date.today()
-            max_data = df_filtrado["Data_Dt"].max().date() if not df_filtrado["Data_Dt"].isna().all() else date.today()
-            
-            periodo = c_f1.date_input("Filtrar Período:", [min_data, max_data])
-            naturezas_disponiveis = df_filtrado["Tipo"].unique().tolist()
-            f_nat = c_f2.multiselect("Filtrar Natureza do Fato:", naturezas_disponiveis, default=naturezas_disponiveis)
-            
-            motivos_disponiveis = df_filtrado["Motivo"].unique().tolist()
-            f_mot = c_f3.multiselect("Filtrar Motivo Padronizado:", motivos_disponiveis, default=motivos_disponiveis)
-            
-            df_graf = df_filtrado.copy()
-            if len(periodo) == 2:
-                d_ini, d_fim = periodo
-                df_graf = df_graf[(df_graf["Data_Dt"].dt.date >= d_ini) & (df_graf["Data_Dt"].dt.date <= d_fim)]
-            df_graf = df_graf[df_graf["Tipo"].isin(f_nat) & df_graf["Motivo"].isin(f_mot)]
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            if not df_graf.empty:
-                df_temporal = df_graf.groupby(["Data", "Tipo"]).agg(Pontos_Dia=("Pontos", "sum"), Ocorrencias=("ID", "count")).reset_index().sort_values("Data")
-                
-                fig_tempo = px.bar(
-                    df_temporal, x="Data", y="Pontos_Dia", color="Tipo",
-                    title="Evolução Diária de Gravidade (Pontos Acumulados por Dia)",
-                    template="plotly_dark", height=320,
-                    color_discrete_map={"Negligência Grave": "#ef4444", "Devolução por Falha": "#F5A623", "Comportamental": "#1261A3", "Dificuldade Operacional": "#8b5cf6", "Ação Positiva (Elogio)": "#10b981"}
+        tab_mot = df_prio_neg.groupby(["Colaborador", "Prioridade"]).size().unstack(fill_value=0)
+        for col_p in ["Alta", "Média", "Baixa"]:
+            if col_p not in tab_mot.columns:
+                tab_mot[col_p] = 0
+        tab_mot["Total"] = tab_mot["Alta"] + tab_mot["Média"] + tab_mot["Baixa"]
+        tab_mot["% Alta"] = (tab_mot["Alta"] / tab_mot["Total"] * 100).round(1)
+        tab_mot["% Média"] = (tab_mot["Média"] / tab_mot["Total"] * 100).round(1)
+        tab_mot["% Baixa"] = (tab_mot["Baixa"] / tab_mot["Total"] * 100).round(1)
+        tab_mot = tab_mot.sort_values(by=["% Alta", "Total"], ascending=[True, True]).reset_index()
+
+        c_m1, c_m2 = st.columns([3, 2])
+        with c_m1:
+            if "Proporção em %" in modo_visao_mot:
+                df_melt = tab_mot.melt(id_vars=["Colaborador", "Total"], value_vars=["% Alta", "% Média", "% Baixa"], var_name="Nível", value_name="Percentual")
+                df_melt["Prioridade"] = df_melt["Nível"].str.replace("% ", "")
+                fig_mot = px.bar(
+                    df_melt,
+                    y="Colaborador",
+                    x="Percentual",
+                    color="Prioridade",
+                    orientation="h",
+                    color_discrete_map=CORES_PRIORIDADE,
+                    title="Distribuição % de Prioridades por Colaborador (Ocorrências Validadas)",
+                    text=df_melt["Percentual"].apply(lambda x: f"{x:.0f}%" if x > 5 else "")
                 )
-                fig_tempo.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig_tempo, use_container_width=True)
-                
-                g_col1, g_col2 = st.columns(2)
-                df_negativos = df_graf[df_graf["Pontos"] > 0]
-                
-                with g_col1:
-                    if not df_negativos.empty:
-                        fig_bar = px.bar(
-                            df_negativos, y="Colaborador", x="Pontos", color="Tipo", orientation="h", 
-                            title="Top Ofensores no Período", template="plotly_dark", height=320,
-                            color_discrete_map={"Negligência Grave": "#ef4444", "Devolução por Falha": "#F5A623", "Comportamental": "#1261A3", "Dificuldade Operacional": "#8b5cf6"}
-                        )
-                        fig_bar.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", yaxis={'categoryorder':'total ascending'})
-                        st.plotly_chart(fig_bar, use_container_width=True)
-                    else:
-                        st.info("Sem ofensores no período selecionado.")
-
-                with g_col2:
-                    if not df_negativos.empty:
-                        fig_pie = px.pie(df_negativos, names="Motivo", hole=0.55, title="Causas Raízes no Período", template="plotly_dark", height=320)
-                        fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)")
-                        st.plotly_chart(fig_pie, use_container_width=True)
-                    else:
-                        st.info("Sem dados para o gráfico de causas.")
-                        
-                st.markdown("#### 📋 Histórico Cronológico Filtrado")
-                st.dataframe(df_graf[["Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Status"]].sort_values(by="Data", ascending=False), use_container_width=True, hide_index=True)
+                fig_mot.update_layout(template="plotly_dark", height=max(380, len(tab_mot) * 32), xaxis_title="% de Incidência", yaxis_title="")
             else:
-                st.warning("Nenhum registro encontrado para os filtros selecionados.")
-        else:
-            st.info("Sem dados suficientes na base.")
+                df_melt = tab_mot.melt(id_vars=["Colaborador", "Total"], value_vars=["Alta", "Média", "Baixa"], var_name="Prioridade", value_name="Qtd")
+                fig_mot = px.bar(
+                    df_melt,
+                    y="Colaborador",
+                    x="Qtd",
+                    color="Prioridade",
+                    orientation="h",
+                    color_discrete_map=CORES_PRIORIDADE,
+                    title="Volume de Ocorrências por Prioridade e Colaborador",
+                    text_auto=True
+                )
+                fig_mot.update_layout(template="plotly_dark", height=max(380, len(tab_mot) * 32), xaxis_title="Quantidade", yaxis_title="")
+            st.plotly_chart(fig_mot, use_container_width=True)
 
-# ================= PÁGINA 2: PRONTUÁRIO INDIVIDUAL =================
-elif pagina == "👤 Prontuário Individual (1 a 80)":
-    st.markdown("## 👤 Dossiê Individual do Colaborador")
-    
-    lista_nomes = sorted(df_colab["Colaborador"].unique())
-    selecionado = st.selectbox("🔍 Pesquisar Motorista ou Ajudante:", lista_nomes)
-    
-    funcao_colab = df_colab[df_colab["Colaborador"] == selecionado]["Funcao"].iloc[0]
-    df_ind = df[df["Colaborador"] == selecionado].copy() if not df.empty else pd.DataFrame()
-    
-    c1, c2 = st.columns([3, 7])
-    with c1:
-        score_atual = df_ind["Pontos"].sum() if not df_ind.empty else 0
-        st.metric(f"Score Acumulado ({funcao_colab})", f"{score_atual} pts")
-        if score_atual >= 8: st.error("⚠️ ALERTA: Limite crítico atingido.")
-        elif score_atual == 0 and df_ind.empty: st.success("✔️ Ficha Limpa (Nenhuma ocorrência registrada).")
-            
-    with c2:
-        st.markdown(f"### 📋 Linha do Tempo — {selecionado} ({funcao_colab})")
-        if not df_ind.empty:
-            for _, row in df_ind.sort_values(by="Data", ascending=False).iterrows():
-                classe = "card-positivo" if row["Pontos"] < 0 else "card-ocorrencia"
-                tratativa = row["Acao_Gestor"] if pd.notna(row["Acao_Gestor"]) and str(row["Acao_Gestor"]).strip() != "" else "⏳ Aguardando..."
-                st.markdown(f'<div class="{classe}"><b>{row["Data"]} | {row["Tipo"]} - {row["Motivo"]}</b><br><small>Relato: {row["Detalhe"]}<br><b>Tratativa:</b> {tratativa}</small></div>', unsafe_allow_html=True)
-        else:
-            st.info("Este colaborador não possui ocorrências registradas até o momento.")
+        with c_m2:
+            st.markdown("##### 📋 Tabela Resumo (% e Volume por Colaborador)")
+            df_exib_mot = tab_mot.sort_values(by=["Alta", "Total"], ascending=False)[
+                ["Colaborador", "Total", "% Alta", "% Média", "% Baixa", "Alta", "Média", "Baixa"]
+            ]
+            st.dataframe(df_exib_mot, use_container_width=True, hide_index=True, height=360)
+    else:
+        st.info("Nenhuma ocorrência validada (Alta, Média ou Baixa) para exibir a matriz percentual por colaborador.")
 
-    st.markdown("---")
-    st.markdown("### 📈 Curva de Comportamento (Antes e Depois do Feedback)")
-    if not df_ind.empty:
-        df_ind['Data_Grafico'] = pd.to_datetime(df_ind['Data'])
-        df_ind = df_ind.sort_values('Data_Grafico')
-        fig_evol = px.bar(df_ind, x='Data_Grafico', y='Pontos', color='Tipo', template='plotly_dark',
-                          color_discrete_map={"Negligência Grave": "#ef4444", "Devolução por Falha": "#F5A623", "Comportamental": "#1261A3", "Dificuldade Operacional": "#8b5cf6", "Ação Positiva (Elogio)": "#10b981"})
-        tratativas_feitas = df_ind[df_ind['Data_Tratativa'].notna() & (df_ind['Data_Tratativa'] != "")]
-        for _, row in tratativas_feitas.iterrows():
-            dt_trat = pd.to_datetime(row['Data_Tratativa'])
-            fig_evol.add_vline(x=dt_trat, line_width=2, line_dash="dash", line_color="#F5A623")
-            fig_evol.add_annotation(x=dt_trat, y=max(df_ind['Pontos'].max(), 5), text=f"👔 {row['Status']}", showarrow=False, yshift=15, font=dict(color="#F5A623", size=12))
-        fig_evol.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig_evol, use_container_width=True)
+    # --- BLOCO 3: MOTIVOS (COM RV VS SEM RV) E GOVERNANÇA ---
+    st.markdown('<div class="titulo-secao">🔍 3. Incidências por Motivo (Afeta RV vs Operacional Sem RV)</div>', unsafe_allow_html=True)
+    if not df_filtrado.empty:
+        g_inf1, g_inf2 = st.columns([3, 2])
+        with g_inf1:
+            df_mot_rank = df_filtrado.groupby(["Motivo", "Impacta_RV"]).size().reset_index(name="Qtd").sort_values("Qtd", ascending=True)
+            fig_mot_rank = px.bar(
+                df_mot_rank,
+                y="Motivo",
+                x="Qtd",
+                color="Impacta_RV",
+                orientation="h",
+                color_discrete_map={"Sim": "#EF4444", "Não": "#3B82F6"},
+                title="Ranking de Motivos Registrados (Vermelho = Afeta Variável | Azul = Não Afeta)",
+                text_auto=True
+            )
+            fig_mot_rank.update_layout(template="plotly_dark", height=400)
+            st.plotly_chart(fig_mot_rank, use_container_width=True)
 
-# ================= PÁGINA 3: CENTRAL DE TRATATIVAS (GESTOR) =================
-elif pagina == "⚡ Central de Tratativas (Gestor)":
-    st.markdown("## ⚡ Mesa de Decisão e Gestão de Ocorrências")
-    
-    aba_tratar, aba_excluir = st.tabs(["✍️ Dar Baixa / Tratativas", "🗑️ Excluir Registros Incorretos"])
-    
-    with aba_tratar:
-        df_pend = df[df["Status"] == "Pendente"] if not df.empty else pd.DataFrame()
+        with g_inf2:
+            df_gov = df_filtrado["Status"].value_counts().reset_index()
+            df_gov.columns = ["Status", "Quantidade"]
+            fig_gov = px.pie(
+                df_gov,
+                names="Status",
+                values="Quantidade",
+                hole=0.45,
+                title="Funil de Governança (Status das Ocorrências)",
+                color="Status",
+                color_discrete_map={
+                    "Validado (Impacta RV)": "#EF4444",
+                    "Validado (Operacional Sem Impacto RV)": "#3B82F6",
+                    "Justificado / Abonado": "#10B981",
+                    "Pendente de Validação": "#94A3B8"
+                }
+            )
+            fig_gov.update_layout(template="plotly_dark", height=400)
+            st.plotly_chart(fig_gov, use_container_width=True)
+
+
+# ==============================================================================
+# PÁGINA 2: REGISTRAR OCORRÊNCIA (TORRE DE MONITORAMENTO)
+# ==============================================================================
+elif pagina == "🚨 Registrar Ocorrência (Torre)":
+    st.markdown("## 🚨 Novo Apontamento Operacional (Torre / Monitoramento)")
+    st.caption("Registre o apontamento abaixo. Ele entrará como **'Pendente de Validação'** para que o gestor valide o impacto na variável ou registre a tratativa.")
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        lista_nomes = sorted(df_colab["Colaborador"].unique().tolist()) if not df_colab.empty else ["Carlos Eduardo"]
+        colab_sel = st.selectbox("Colaborador:", lista_nomes)
+        func_auto = "Motorista"
+        if not df_colab.empty and colab_sel in df_colab["Colaborador"].values:
+            func_auto = df_colab[df_colab["Colaborador"] == colab_sel]["Funcao"].iloc[0]
+        st.text_input("Função:", value=func_auto, disabled=True)
+
+    with col_f2:
+        data_ocorr = st.date_input("Data do Ocorrido:", value=date.today())
+        rota_ocorr = st.text_input("Rota / Placa / Cidade:", placeholder="Ex: Rota Varginha / Sul de Minas")
+
+    with col_f3:
+        motivo_sel = st.selectbox("Motivo / Incidência:", lista_motivos)
+        prio_sugerida = mapa_prioridade_motivo.get(motivo_sel, "Média")
+        rv_sugerido = mapa_rv_motivo.get(motivo_sel, "Não")
+
+        opcoes_prio = ["Alta", "Média", "Baixa", "Positivo"]
+        idx_prio = opcoes_prio.index(prio_sugerida) if prio_sugerida in opcoes_prio else 1
+        prio_sel = st.selectbox("Prioridade do Acontecimento:", opcoes_prio, index=idx_prio)
+
+    st.info(f"📌 **Classificação Automática do Motivo:** Prioridade **{prio_sel}** | Afeta Remuneração Variável? **{rv_sugerido}**")
+
+    detalhe_ocorr = st.text_area("Descrição Detalhada do Fato (Torre):", height=100, placeholder="Descreva o que aconteceu, número de NF, cliente, horário...")
+    reg_por = st.text_input("Registrado por (Operador da Torre / Gestão):", value="Torre de Monitoramento")
+
+    if st.button("✅ Registrar Apontamento no Sistema", use_container_width=True, type="primary"):
+        if engine:
+            try:
+                novo_id = 1
+                if not df.empty and "ID" in df.columns:
+                    novo_id = int(df["ID"].max()) + 1
+
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO ocorrencias (
+                            id, data, colaborador, funcao, rota, tipo, motivo, detalhe,
+                            pontos, status, acao_gestor, data_tratativa, registrado_por,
+                            prioridade, impacta_rv, tem_anexo
+                        ) VALUES (
+                            :id, :data, :colab, :func, :rota, :tipo, :mot, :det,
+                            0, :status, '', '', :reg,
+                            :prio, :rv, 'Não'
+                        )
+                    """), {
+                        "id": novo_id,
+                        "data": data_ocorr.strftime("%d/%m/%Y"),
+                        "colab": colab_sel,
+                        "func": func_auto,
+                        "rota": rota_ocorr.strip() if rota_ocorr.strip() else "Não informada",
+                        "tipo": prio_sel,
+                        "mot": motivo_sel,
+                        "det": detalhe_ocorr.strip(),
+                        "status": "Pendente de Validação",
+                        "reg": reg_por.strip(),
+                        "prio": prio_sel,
+                        "rv": rv_sugerido
+                    })
+                st.cache_data.clear()
+                st.success(f"✅ Ocorrência #{novo_id} registrada com sucesso! Enviada para a Mesa do Gestor.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao salvar ocorrência: {e}")
+
+
+# ==============================================================================
+# PÁGINA 3: MESA DO GESTOR (VALIDAÇÃO, ANEXOS LEVES E BACKLOG DE TRATATIVAS)
+# ==============================================================================
+elif pagina == "⚖️ Mesa do Gestor & Backlog":
+    st.markdown("## ⚖️ Mesa de Validação do Gestor & Histórico de Ações Tratadas")
+
+    aba_pendentes, aba_backlog = st.tabs([
+        "⏳ 1. Fila Pendente de Validação (Aprovar / Abonar / Tratar)",
+        "🗂️ 2. Backlog Completo de Ocorrências Solucionadas e Justificadas"
+    ])
+
+    with aba_pendentes:
+        df_pend = df[df["Status"] == "Pendente de Validação"].copy() if not df.empty else pd.DataFrame()
+        st.markdown(f'<div class="titulo-secao">⏳ Ocorrências Aguardando Decisão do Gestor ({len(df_pend)})</div>', unsafe_allow_html=True)
+
         if df_pend.empty:
-            st.success("🎉 Não há ocorrências pendentes de tratativa no momento!")
+            st.success("🎉 Tudo em dia! Não há nenhuma ocorrência pendente de validação no momento.")
         else:
-            opcoes = df_pend.apply(lambda r: f"ID {r['ID']} | {r['Colaborador']} ({r['Funcao']}) - {r['Motivo']}", axis=1).tolist()
-            escolha = st.selectbox("Selecione o caso para tratar:", opcoes)
-            id_selecionado = int(escolha.split(" | ")[0].replace("ID ", ""))
-            
-            caso_atual = df[df["ID"] == id_selecionado].iloc[0]
-            st.info(f"**Relato da Torre ({caso_atual['Data']} - Rota {caso_atual['Rota']}):** {caso_atual['Detalhe']}")
-            
-            with st.form("form_gestor"):
-                novo_status = st.selectbox("Ação Aplicada:", ["Feedback Aplicado", "Advertência Verbal", "Advertência Escrita", "Encaminhado p/ Treinamento", "Suspensão", "Caso Justificado / Arquivado"])
-                obs_gestor = st.text_area("O que foi conversado / definido com o colaborador?")
-                if st.form_submit_button("💾 Salvar Tratativa", use_container_width=True):
-                    if engine:
+            st.dataframe(
+                df_pend[["ID", "Data", "Colaborador", "Funcao", "Rota", "Motivo", "Prioridade", "Impacta_RV", "Detalhe"]],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.markdown("---")
+            st.markdown("### ✍️ Validar e Registrar Tratativa do Gestor")
+            c_g1, c_g2 = st.columns([1, 2])
+
+            with c_g1:
+                opcoes_id = df_pend.apply(
+                    lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']} em {r['Data']})", axis=1
+                ).tolist()
+                sel_item = st.selectbox("Selecione a Ocorrência para Tratar:", opcoes_id)
+                id_escolhido = int(sel_item.split("#")[1].split(" -")[0])
+                linha_atual = df_pend[df_pend["ID"] == id_escolhido].iloc[0]
+
+                st.write(f"**Colaborador:** {linha_atual['Colaborador']}")
+                st.write(f"**Motivo:** {linha_atual['Motivo']}")
+                st.write(f"**Prioridade Atual:** {linha_atual['Prioridade']} | **Afeta RV?** {linha_atual['Impacta_RV']}")
+                st.caption(f"**Relato da Torre:** {linha_atual['Detalhe']}")
+
+            with c_g2:
+                # Se o motivo originalmente impacta RV, destaca as opções de Aprovar Desconto ou Abonar
+                if linha_atual["Impacta_RV"] == "Sim":
+                    opcoes_decisao = [
+                        "🔴 Aprovar Impacto -> Vai para o Laudo de Variável (Desconta RV)",
+                        "🟢 Reprovar Impacto / Abonar -> Falta ou Evento Justificado (Vai para o Backlog sem descontar RV)",
+                        "🔵 Converter em Tratativa Operacional -> Mantém no Dossiê mas isenta desconto na RV"
+                    ]
+                else:
+                    opcoes_decisao = [
+                        "🔵 Validar Tratativa Operacional (Sem Impacto na RV -> Entra no Dossiê e Cadência)",
+                        "🟢 Abonar / Arquivar com Justificativa (Vai para o Backlog de Justificadas)",
+                        "🔴 Forçar Impacto na Variável -> Incluir no Laudo de Variável"
+                    ]
+
+                decisao_gestor = st.radio("Decisão do Gestor:", opcoes_decisao)
+                nova_prio = st.selectbox(
+                    "Confirmar ou Ajustar Prioridade:",
+                    ["Alta", "Média", "Baixa", "Positivo"],
+                    index=["Alta", "Média", "Baixa", "Positivo"].index(linha_atual["Prioridade"]) if linha_atual["Prioridade"] in ["Alta", "Média", "Baixa", "Positivo"] else 1
+                )
+                parecer_gestor = st.text_area(
+                    "Registro Histórico / Parecer do Gestor (Obrigatório):",
+                    placeholder="Ex: Apresentou atestado médico válido / Orientado em reunião / Confirmada devolução sem contato com a Torre..."
+                )
+                arquivo_anexo = st.file_uploader(
+                    "📎 Anexar Comprovante / Atestado / Evidência (Imagem ou PDF leve - Opcional):",
+                    type=["jpg", "jpeg", "png", "webp", "pdf"]
+                )
+
+                if st.button("💾 Confirmar Validação do Gestor", type="primary", use_container_width=True):
+                    if not parecer_gestor.strip():
+                        st.warning("⚠️ Por favor, escreva o parecer/justificativa do gestor para manter o histórico completo.")
+                    elif engine:
+                        if "🔴" in decisao_gestor:
+                            novo_status = "Validado (Impacta RV)"
+                            novo_rv = "Sim"
+                        elif "🟢" in decisao_gestor:
+                            novo_status = "Justificado / Abonado"
+                            novo_rv = "Não"
+                        else:
+                            novo_status = "Validado (Operacional Sem Impacto RV)"
+                            novo_rv = "Não"
+
+                        tem_anexo_flag = "Não"
+                        nome_arq, mime_arq, b64_arq = None, None, None
+                        if arquivo_anexo is not None:
+                            nome_arq, mime_arq, b64_arq = comprimir_e_codificar_arquivo(arquivo_anexo)
+                            if nome_arq == "ERRO_TAMANHO":
+                                st.error("O PDF excede 1 MB. Envie uma foto/print (que o sistema comprime sozinho) ou um PDF menor.")
+                                st.stop()
+                            tem_anexo_flag = "Sim"
+
                         try:
                             with engine.begin() as conn:
-                                conn.execute(
-                                    text("UPDATE ocorrencias SET status = :status, acao_gestor = :acao, data_tratativa = :data WHERE id = :id"),
-                                    {"status": novo_status, "acao": obs_gestor, "data": datetime.now().strftime("%Y-%m-%d"), "id": id_selecionado}
-                                )
-                            st.toast("✅ Salvo com sucesso no Neon PostgreSQL!")
+                                conn.execute(text("""
+                                    UPDATE ocorrencias
+                                    SET status = :st,
+                                        acao_gestor = :acao,
+                                        data_tratativa = :dt,
+                                        prioridade = :prio,
+                                        tipo = :prio,
+                                        impacta_rv = :rv,
+                                        tem_anexo = :anexo
+                                    WHERE id = :id
+                                """), {
+                                    "st": novo_status,
+                                    "acao": parecer_gestor.strip(),
+                                    "dt": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                    "prio": nova_prio,
+                                    "rv": novo_rv,
+                                    "anexo": tem_anexo_flag,
+                                    "id": id_escolhido
+                                })
+
+                                if tem_anexo_flag == "Sim" and b64_arq:
+                                    conn.execute(text("""
+                                        INSERT INTO ocorrencias_anexos (id_ocorrencia, nome_arquivo, tipo_mime, dados_base64)
+                                        VALUES (:id, :nome, :mime, :b64)
+                                        ON CONFLICT (id_ocorrencia) DO UPDATE
+                                        SET nome_arquivo = :nome, tipo_mime = :mime, dados_base64 = :b64
+                                    """), {
+                                        "id": id_escolhido,
+                                        "nome": nome_arq,
+                                        "mime": mime_arq,
+                                        "b64": b64_arq
+                                    })
+                            st.cache_data.clear()
+                            st.success(f"✅ Ocorrência #{id_escolhido} validada como '{novo_status}'!")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Erro ao salvar no banco: {e}")
+                            st.error(f"Erro ao validar ocorrência: {e}")
 
-    with aba_excluir:
-        st.markdown("### ⚠️ Área Restrita de Exclusão de Registros")
-        if df.empty:
-            st.info("Não há registros na base.")
+    with aba_backlog:
+        st.markdown('<div class="titulo-secao">🗂️ Backlog de Todas as Ações Tratadas (Com RV, Sem RV e Justificadas)</div>', unsafe_allow_html=True)
+        df_tratadas = df[df["Status"] != "Pendente de Validação"].copy() if not df.empty else pd.DataFrame()
+
+        if df_tratadas.empty:
+            st.info("Nenhuma ocorrência tratada até o momento.")
         else:
-            termo_busca = st.text_input("🔍 Digite o nome do colaborador ou motivo para filtrar:").strip().lower()
-            df_excluir_filtrado = df.copy()
-            if termo_busca:
-                df_excluir_filtrado = df_excluir_filtrado[
-                    df_excluir_filtrado["Colaborador"].str.lower().str.contains(termo_busca, na=False) |
-                    df_excluir_filtrado["Motivo"].str.lower().str.contains(termo_busca, na=False) |
-                    df_excluir_filtrado["Tipo"].str.lower().str.contains(termo_busca, na=False)
-                ]
-            
-            if df_excluir_filtrado.empty:
-                st.warning("Nenhuma ocorrência encontrada com esse termo de busca.")
-            else:
-                opcoes_excluir = df_excluir_filtrado.apply(lambda r: f"ID {r['ID']} | {r['Data']} - {r['Colaborador']} ({r['Tipo']}: {r['Motivo']})", axis=1).tolist()
-                registro_escolhido = st.selectbox("Selecione a ocorrência:", opcoes_excluir)
-                
-                if registro_escolhido:
-                    id_excluir = int(registro_escolhido.split(" | ")[0].replace("ID ", ""))
-                    detalhe_exclusao = df[df["ID"] == id_excluir].iloc[0]
-                    st.warning(f"Apagar registro de **{detalhe_exclusao['Colaborador']}** em **{detalhe_exclusao['Data']}**?")
-                    
-                    if st.button("🗑️ Confirmar Exclusão Definitiva", type="primary"):
-                        if engine:
-                            try:
-                                with engine.begin() as conn:
-                                    conn.execute(text("DELETE FROM ocorrencias WHERE id = :id"), {"id": id_excluir})
-                                st.success("✅ Ocorrência apagada do banco!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao excluir: {e}")
+            f_status = st.multiselect(
+                "Filtrar por Tipo de Decisão do Gestor:",
+                options=df_tratadas["Status"].unique().tolist(),
+                default=df_tratadas["Status"].unique().tolist()
+            )
+            df_b_view = df_tratadas[df_tratadas["Status"].isin(f_status)]
 
-# ================= PÁGINA 4: LANÇAMENTO DA TORRE =================
-elif pagina == "➕ Registrar Ocorrência (Torre)":
-    st.markdown("## ➕ Registro Diário — Central de Monitoramento")
-    col_nome, col_funcao, col_rota = st.columns([5, 3, 4])
-    lista_ordenada = sorted(df_colab["Colaborador"].unique())
-    
-    nome_selecionado = col_nome.selectbox("🔍 Pesquisar Motorista ou Ajudante:", lista_ordenada)
-    funcao_automatica = df_colab[df_colab["Colaborador"] == nome_selecionado]["Funcao"].iloc[0]
-    
-    col_funcao.markdown(f'<div class="badge-funcao">🪪 Função: {funcao_automatica}</div>', unsafe_allow_html=True)
-    rota_input = col_rota.text_input("Rota / Cidade (Ex: Varginha, Passos...)")
-    
-    with st.form("form_torre", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        tipo = c1.selectbox("Natureza do Fato", lista_naturezas)
-        motivo = c2.selectbox("Motivo Padronizado", lista_motivos)
-        detalhe = st.text_area("Relato detalhado do que aconteceu:")
-        
-        if st.form_submit_button("🚀 Registrar Ocorrência no Sistema", use_container_width=True):
-            pontos = 5 if "Negligência" in tipo else (3 if "Devolução" in tipo else (-3 if "Elogio" in tipo or "Positiva" in tipo else 2))
-            novo_id = int(df["ID"].max() + 1) if not df.empty and pd.notna(df["ID"].max()) else 101
-            status_inicial = "Reconhecido" if "Elogio" in tipo or "Positiva" in tipo else "Pendente"
-            
-            if engine:
-                try:
+            st.dataframe(
+                df_b_view[[
+                    "ID", "Data", "Colaborador", "Motivo", "Prioridade",
+                    "Status", "Impacta_RV", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"
+                ]],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # Consulta de Anexo sob Demanda (Lazy Loading) ou Exclusão/Reabertura
+            col_anx, col_adm = st.columns(2)
+            with col_anx:
+                st.markdown("#### 📎 Visualizar / Baixar Anexo de Evidência")
+                df_com_anexo = df_b_view[df_b_view["Tem_Anexo"] == "Sim"]
+                if not df_com_anexo.empty:
+                    id_anexo_sel = st.selectbox(
+                        "Escolha a ocorrência com anexo:",
+                        df_com_anexo.apply(lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']})", axis=1).tolist()
+                    )
+                    if st.button("🔍 Carregar Anexo do Banco"):
+                        id_busca = int(id_anexo_sel.split("#")[1].split(" -")[0])
+                        nome_a, mime_a, b64_a = buscar_anexo_no_banco(id_busca)
+                        if b64_a:
+                            bytes_arq = base64.b64decode(b64_a)
+                            st.download_button(
+                                label=f"⬇️ Baixar {nome_a}",
+                                data=bytes_arq,
+                                file_name=nome_a,
+                                mime=mime_a
+                            )
+                            if mime_a.startswith("image/"):
+                                st.image(bytes_arq, caption=f"Anexo da Ocorrência #{id_busca}", use_container_width=True)
+                        else:
+                            st.warning("Anexo não encontrado.")
+                else:
+                    st.caption("Nenhum registro filtrado possui anexo vinculado.")
+
+            with col_adm:
+                st.markdown("#### 🔄 Reabrir ou Excluir Registro")
+                id_gerenciar = st.selectbox(
+                    "Selecione o ID:",
+                    df_b_view.apply(lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']})", axis=1).tolist(),
+                    key="sel_reabrir_id"
+                )
+                id_ alvo = int(id_gerenciar.split("#")[1].split(" -")[0])
+                b_reab, b_excl = st.columns(2)
+                if b_reab.button("↩️ Devolver para Pendente", use_container_width=True):
                     with engine.begin() as conn:
-                        conn.execute(
-                            text("""
-                                INSERT INTO ocorrencias (id, data, colaborador, funcao, rota, tipo, motivo, detalhe, pontos, status, acao_gestor, data_tratativa, registrado_por)
-                                VALUES (:id, :data, :colab, :func, :rota, :tipo, :motivo, :detalhe, :pontos, :status, :acao, :data_trat, :reg)
-                            """),
-                            {
-                                "id": novo_id,
-                                "data": datetime.now().strftime("%Y-%m-%d"),
-                                "colab": nome_selecionado,
-                                "func": funcao_automatica,
-                                "rota": rota_input if rota_input else "-",
-                                "tipo": tipo,
-                                "motivo": motivo,
-                                "detalhe": detalhe if detalhe else "-",
-                                "pontos": pontos,
-                                "status": status_inicial,
-                                "acao": "",
-                                "data_trat": None,
-                                "reg": st.session_state["nome_usuario"]
-                            }
-                        )
-                    st.success(f"✅ Ocorrência salva no Neon PostgreSQL para **{nome_selecionado}**!")
+                        conn.execute(text("UPDATE ocorrencias SET status = 'Pendente de Validação' WHERE id = :id"), {"id": id_alvo})
+                    st.cache_data.clear()
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Erro ao salvar no banco: {e}")
+                if b_excl.button("🗑️ Excluir Registro", use_container_width=True):
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM ocorrencias WHERE id = :id"), {"id": id_alvo})
+                        conn.execute(text("DELETE FROM ocorrencias_anexos WHERE id_ocorrencia = :id"), {"id": id_alvo})
+                    st.cache_data.clear()
+                    st.rerun()
 
-# ================= PÁGINA 5: CADASTRAR EQUIPE & PARÂMETROS =================
-elif pagina == "👥 Cadastrar Equipe & Parâmetros":
-    st.markdown("## 👥 Gestão de Equipe e Parâmetros do Sistema")
-    
-    aba_lote, aba_individual, aba_parametros, aba_limpar = st.tabs([
-        "📋 1. Colaboradores", 
-        "➕ 2. Adicionar/Remover", 
-        "⚙️ 3. Naturezas e Motivos", 
-        "🧹 4. Zerar Base"
+
+# ==============================================================================
+# PÁGINA 4: LAUDO OFICIAL DE REMUNERAÇÃO VARIÁVEL (R$ 250,00)
+# ==============================================================================
+elif pagina == "💰 Laudo Remuneração Variável":
+    st.markdown("## 💰 Laudo de Fechamento da Remuneração Variável (Base: R$ 250,00)")
+    st.caption("Regra Oficial: **20% de perda = -R$ 50,00** | **100% de perda = -R$ 250,00**. Apenas ocorrências **Validadas pelo Gestor com Impacto na RV** descontam da premiação.")
+
+    df_colab_filtrado = df_colab[df_colab["Funcao"].isin(funcao_filtro)] if not df_colab.empty else df_colab
+    df_laudo = calcular_fechamento_rv(df_filtrado, df_colab_filtrado, df_motivos)
+
+    # Alerta se houver ocorrências de RV ainda não validadas pelo gestor
+    pend_rv = df_filtrado[(df_filtrado["Status"] == "Pendente de Validação") & (df_filtrado["Impacta_RV"] == "Sim")] if not df_filtrado.empty else pd.DataFrame()
+    if not pend_rv.empty:
+        st.warning(f"⚠️ **Atenção antes de fechar a folha:** Existem **{len(pend_rv)} ocorrências que afetam a variável** aguardando aprovação na aba **'⚖️ Mesa do Gestor'**.")
+
+    if not df_laudo.empty:
+        total_previsto = df_laudo["Valor Base (R$)"].sum()
+        total_descontos = df_laudo["Desconto (R$)"].sum()
+        total_pagar = df_laudo["Valor a Pagar (R$)"].sum()
+
+        qtd_100 = len(df_laudo[df_laudo["% Perda RV"] == 0])
+        qtd_parcial = len(df_laudo[(df_laudo["% Perda RV"] > 0) & (df_laudo["% Perda RV"] < 100)])
+        qtd_zerado = len(df_laudo[df_laudo["% Perda RV"] == 100])
+
+        k_rv1, k_rv2, k_rv3, k_rv4 = st.columns(4)
+        with k_rv1:
+            st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #10B981;">
+                <div class="kpi-title">🟢 100% Elegíveis (R$ 250)</div>
+                <div class="kpi-value" style="color:#10B981;">{qtd_100}</div>
+                <div class="kpi-sub">Recebem valor integral</div>
+            </div>""", unsafe_allow_html=True)
+        with k_rv2:
+            st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #F59E0B;">
+                <div class="kpi-title">🟡 Pagamento Parcial</div>
+                <div class="kpi-value" style="color:#F59E0B;">{qtd_parcial}</div>
+                <div class="kpi-sub">Perda de 20% a 80%</div>
+            </div>""", unsafe_allow_html=True)
+        with k_rv3:
+            st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #EF4444;">
+                <div class="kpi-title">🔴 Perda Total (R$ 0)</div>
+                <div class="kpi-value" style="color:#EF4444;">{qtd_zerado}</div>
+                <div class="kpi-sub">Perderam 100% da variável</div>
+            </div>""", unsafe_allow_html=True)
+        with k_rv4:
+            st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #3B82F6;">
+                <div class="kpi-title">💵 Total Líquido a Pagar</div>
+                <div class="kpi-value">R$ {total_pagar:,.2f}</div>
+                <div class="kpi-sub">Economia/Retenção: R$ {total_descontos:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+
+        g_rv1, g_rv2 = st.columns([2, 3])
+        with g_rv1:
+            df_pizza_rv = pd.DataFrame({
+                "Situação": ["🟢 100% Integral (R$ 250)", "🟡 Pagamento Parcial", "🔴 Perda Total (R$ 0)"],
+                "Colaboradores": [qtd_100, qtd_parcial, qtd_zerado]
+            })
+            fig_p_rv = px.pie(
+                df_pizza_rv,
+                names="Situação",
+                values="Colaboradores",
+                hole=0.45,
+                title="Elegibilidade da Frota na Variável",
+                color="Situação",
+                color_discrete_map={
+                    "🟢 100% Integral (R$ 250)": "#10B981",
+                    "🟡 Pagamento Parcial": "#F59E0B",
+                    "🔴 Perda Total (R$ 0)": "#EF4444"
+                }
+            )
+            fig_p_rv.update_layout(template="plotly_dark", height=360)
+            st.plotly_chart(fig_p_rv, use_container_width=True)
+
+        with g_rv2:
+            df_ocorr_rv = df_filtrado[df_filtrado["Status"] == "Validado (Impacta RV)"] if not df_filtrado.empty else pd.DataFrame()
+            if not df_ocorr_rv.empty:
+                df_causas = df_ocorr_rv["Motivo"].value_counts().reset_index()
+                df_causas.columns = ["Incidência", "Ocorrências Validadas"]
+                fig_causas = px.bar(
+                    df_causas.sort_values("Ocorrências Validadas", ascending=True),
+                    y="Incidência",
+                    x="Ocorrências Validadas",
+                    orientation="h",
+                    title="Incidências Validadas que Mais Geraram Desconto na Variável",
+                    text_auto=True,
+                    color_discrete_sequence=["#EF4444"]
+                )
+                fig_causas.update_layout(template="plotly_dark", height=360)
+                st.plotly_chart(fig_causas, use_container_width=True)
+            else:
+                st.info("Nenhum desconto de variável validado no período selecionado.")
+
+        st.markdown('<div class="titulo-secao">📋 Laudo Nominal para Fechamento de Folha / Premiação</div>', unsafe_allow_html=True)
+        st.dataframe(df_laudo, use_container_width=True, hide_index=True)
+
+        csv_laudo = df_laudo.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            label="📥 Baixar Laudo de Remuneração Variável (Excel / CSV)",
+            data=csv_laudo,
+            file_name=f"laudo_remuneracao_variavel_{date.today().strftime('%Y_%m_%d')}.csv",
+            mime="text/csv"
+        )
+
+
+# ==============================================================================
+# PÁGINA 5: DOSSIÊ 360º DO COLABORADOR (HISTÓRICO COMPLETO COM E SEM RV)
+# ==============================================================================
+elif pagina == "📁 Dossiê 360º do Colaborador":
+    st.markdown("## 📁 Dossiê 360º do Motorista / Ajudante")
+
+    lista_nomes_d = sorted(df_colab["Colaborador"].unique().tolist()) if not df_colab.empty else ["Carlos Eduardo"]
+    colab_dossie = st.selectbox("Selecione o Colaborador para abrir o Dossiê Completo:", lista_nomes_d)
+
+    df_hist = df_filtrado[df_filtrado["Colaborador"] == colab_dossie].copy() if not df_filtrado.empty else pd.DataFrame()
+    df_laudo_ind = calcular_fechamento_rv(df_filtrado, df_colab[df_colab["Colaborador"] == colab_dossie], df_motivos)
+
+    valor_a_receber = df_laudo_ind["Valor a Pagar (R$)"].iloc[0] if not df_laudo_ind.empty else VALOR_BASE_RV
+    desconto_ind = df_laudo_ind["Desconto (R$)"].iloc[0] if not df_laudo_ind.empty else 0.0
+
+    # Percentuais individuais de Prioridade (Validadas)
+    df_val_ind = df_hist[df_hist["Status"].isin(["Validado (Impacta RV)", "Validado (Operacional Sem Impacto RV)"])] if not df_hist.empty else pd.DataFrame()
+    df_prio_ind = df_val_ind[df_val_ind["Prioridade"].isin(["Alta", "Média", "Baixa"])] if not df_val_ind.empty else pd.DataFrame()
+    tot_p_ind = len(df_prio_ind)
+
+    p_alta_i = (len(df_prio_ind[df_prio_ind["Prioridade"] == "Alta"]) / tot_p_ind * 100) if tot_p_ind > 0 else 0.0
+    p_med_i = (len(df_prio_ind[df_prio_ind["Prioridade"] == "Média"]) / tot_p_ind * 100) if tot_p_ind > 0 else 0.0
+    p_bx_i = (len(df_prio_ind[df_prio_ind["Prioridade"] == "Baixa"]) / tot_p_ind * 100) if tot_p_ind > 0 else 0.0
+
+    qtd_rv_i = len(df_hist[df_hist["Status"] == "Validado (Impacta RV)"]) if not df_hist.empty else 0
+    qtd_op_i = len(df_hist[df_hist["Status"] == "Validado (Operacional Sem Impacto RV)"]) if not df_hist.empty else 0
+    qtd_ab_i = len(df_hist[df_hist["Status"] == "Justificado / Abonado"]) if not df_hist.empty else 0
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    with d1:
+        cor_saldo = "#10B981" if desconto_ind == 0 else ("#F59E0B" if valor_a_receber > 0 else "#EF4444")
+        st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid {cor_saldo};">
+            <div class="kpi-title">💰 Saldo Variável</div>
+            <div class="kpi-value" style="color:{cor_saldo};">R$ {valor_a_receber:,.2f}</div>
+            <div class="kpi-sub">Desconto: R$ {desconto_ind:,.2f}</div>
+        </div>""", unsafe_allow_html=True)
+    with d2:
+        st.markdown(f"""<div class="kpi-card">
+            <div class="kpi-title">🔴 % Alta Prioridade</div>
+            <div class="kpi-value" style="color:#EF4444;">{p_alta_i:.1f}%</div>
+            <div class="kpi-sub">Do perfil validado</div>
+        </div>""", unsafe_allow_html=True)
+    with d3:
+        st.markdown(f"""<div class="kpi-card">
+            <div class="kpi-title">🟡 % Média Prioridade</div>
+            <div class="kpi-value" style="color:#F59E0B;">{p_med_i:.1f}%</div>
+            <div class="kpi-sub">Do perfil validado</div>
+        </div>""", unsafe_allow_html=True)
+    with d4:
+        st.markdown(f"""<div class="kpi-card">
+            <div class="kpi-title">🔵 % Baixa Prioridade</div>
+            <div class="kpi-value" style="color:#3B82F6;">{p_bx_i:.1f}%</div>
+            <div class="kpi-sub">Do perfil validado</div>
+        </div>""", unsafe_allow_html=True)
+    with d5:
+        st.markdown(f"""<div class="kpi-card">
+            <div class="kpi-title">⚖️ Resumo Histórico</div>
+            <div class="kpi-value">{len(df_hist)}</div>
+            <div class="kpi-sub">🚨 {qtd_rv_i} RV | 📋 {qtd_op_i} Sem RV | 🛡️ {qtd_ab_i} Abonos</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="titulo-secao">🚨 1. Ocorrências Validadas que Afetaram a Remuneração Variável</div>', unsafe_allow_html=True)
+    df_d_rv = df_hist[df_hist["Status"] == "Validado (Impacta RV)"] if not df_hist.empty else pd.DataFrame()
+    if not df_d_rv.empty:
+        st.dataframe(df_d_rv[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
+    else:
+        st.success("Nenhuma ocorrência que afete a Remuneração Variável para este colaborador no período.")
+
+    st.markdown('<div class="titulo-secao">📋 2. Ocorrências Operacionais Tratadas pelo Gestor (Não Afetam a Variável)</div>', unsafe_allow_html=True)
+    df_d_op = df_hist[df_hist["Status"] == "Validado (Operacional Sem Impacto RV)"] if not df_hist.empty else pd.DataFrame()
+    if not df_d_op.empty:
+        st.dataframe(df_d_op[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhuma ocorrência operacional sem impacto na variável registrada no período.")
+
+    st.markdown('<div class="titulo-secao">🛡️ 3. Histórico de Ocorrências Justificadas / Abonadas pelo Gestor</div>', unsafe_allow_html=True)
+    df_d_ab = df_hist[df_hist["Status"] == "Justificado / Abonado"] if not df_hist.empty else pd.DataFrame()
+    if not df_d_ab.empty:
+        st.dataframe(df_d_ab[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"]], use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nenhum abono/justificativa registrado para este colaborador no período.")
+
+
+# ==============================================================================
+# PÁGINA 6: EQUIPE & PARÂMETROS (MOTIVOS, PRIORIDADES E REGRAS DE RV)
+# ==============================================================================
+elif pagina == "👥 Equipe & Parâmetros":
+    st.markdown("## 👥 Gestão de Equipe e Regras da Remuneração Variável")
+
+    aba_lote, aba_ind, aba_regras, aba_limpar = st.tabs([
+        "📋 1. Importar Equipe em Lote",
+        "➕ 2. Adicionar/Remover Colaborador",
+        "⚙️ 3. Motivos, Prioridades e Regras RV (R$ 250)",
+        "🧹 4. Manutenção de Base"
     ])
-    
+
     with aba_lote:
-        st.markdown('<div class="titulo-secao">Importação de Colaboradores (Nome;Função)</div>', unsafe_allow_html=True)
-        st.caption("Cole abaixo a lista dos colaboradores no formato Nome;Função (um por linha).")
-        texto_lote = st.text_area("Cole sua lista aqui:", height=150, key="txt_lote_colab")
-        
+        st.markdown('<div class="titulo-secao">Importação Rápida de Colaboradores (Nome;Função)</div>', unsafe_allow_html=True)
+        texto_lote = st.text_area("Cole sua lista (um por linha no formato Nome;Motorista ou Nome;Ajudante):", height=150)
         if st.button("🔄 Substituir Base de Colaboradores", use_container_width=True):
             if texto_lote.strip() and engine:
                 linhas = [l.strip() for l in texto_lote.strip().split("\n") if l.strip()]
-                # Usa dicionário para evitar nomes duplicados na própria lista colada
                 mapa_unicos = {}
                 for l in linhas:
                     partes = l.replace("\t", ";").replace(",", ";").split(";")
@@ -554,105 +1132,113 @@ elif pagina == "👥 Cadastrar Equipe & Parâmetros":
                     func_c = "Ajudante" if len(partes) > 1 and "ajud" in partes[1].lower() else "Motorista"
                     if nome_c:
                         mapa_unicos[nome_c] = func_c
-                
                 novos_dados = [{"c": k, "f": v} for k, v in mapa_unicos.items()]
-                
                 try:
                     with engine.begin() as conn:
                         conn.execute(text("DELETE FROM colaboradores"))
                         if novos_dados:
-                            # ENVIO EM LOTE ÚNICO (100x mais rápido que o loop for)
-                            conn.execute(
-                                text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f)"),
-                                novos_dados
-                            )
+                            conn.execute(text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f)"), novos_dados)
                     st.cache_data.clear()
-                    st.success(f"✅ {len(novos_dados)} colaboradores gravados instantaneamente no Neon!")
+                    st.success(f"✅ {len(novos_dados)} colaboradores salvos no Neon!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao atualizar: {e}")
+                    st.error(f"Erro: {e}")
+        st.dataframe(df_colab, use_container_width=True, hide_index=True)
 
-        st.markdown("#### Efetivo Atual no Banco:")
-        st.dataframe(df_colab.sort_values(by="Colaborador"), use_container_width=True, hide_index=True)
-
-    with aba_individual:
-        st.markdown('<div class="titulo-secao">Gerenciamento Individual de Efetivo</div>', unsafe_allow_html=True)
+    with aba_ind:
         c_add, c_rem = st.columns(2)
-        
         with c_add:
-            st.markdown("#### ➕ Adicionar Novo Colaborador")
-            novo_nome = st.text_input("Nome Completo:", key="input_novo_nome_ind")
-            nova_func = st.selectbox("Função:", ["Motorista", "Ajudante"], key="select_nova_func_ind")
-            if st.button("Salvar Colaborador", key="btn_salvar_ind_unico"):
-                if novo_nome.strip() and engine:
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(
-                                text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f) ON CONFLICT (colaborador) DO UPDATE SET funcao = :f"),
-                                {"c": novo_nome.strip().title(), "f": nova_func}
-                            )
-                        st.cache_data.clear()
-                        st.success(f"✅ {novo_nome.strip().title()} adicionado com sucesso!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
-                        
+            st.markdown("#### ➕ Adicionar Colaborador")
+            novo_nome = st.text_input("Nome Completo:")
+            nova_func = st.selectbox("Função:", ["Motorista", "Ajudante"])
+            if st.button("Salvar Colaborador", use_container_width=True) and novo_nome.strip() and engine:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("INSERT INTO colaboradores (colaborador, funcao) VALUES (:c, :f) ON CONFLICT (colaborador) DO UPDATE SET funcao = :f"),
+                        {"c": novo_nome.strip().title(), "f": nova_func}
+                    )
+                st.cache_data.clear()
+                st.success("Colaborador salvo!")
+                st.rerun()
         with c_rem:
             st.markdown("#### 🗑️ Remover Colaborador")
-            lista_atuais = sorted(df_colab["Colaborador"].unique()) if not df_colab.empty else []
+            lista_atuais = sorted(df_colab["Colaborador"].unique().tolist()) if not df_colab.empty else []
             if lista_atuais:
-                rem_nome = st.selectbox("Selecione para remover:", lista_atuais, key="select_rem_colab_unico")
-                if st.button("Remover da Lista", key="btn_remover_ind_unico"):
-                    if engine:
-                        try:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM colaboradores WHERE colaborador = :c"), {"c": rem_nome})
-                            st.cache_data.clear()
-                            st.warning(f"⚠️ Colaborador {rem_nome} removido do banco!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Erro ao remover: {e}")
-            else:
-                st.info("Nenhum colaborador cadastrado na base.")
+                rem_nome = st.selectbox("Selecione para remover:", lista_atuais)
+                if st.button("Remover da Lista", use_container_width=True) and engine:
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM colaboradores WHERE colaborador = :c"), {"c": rem_nome})
+                    st.cache_data.clear()
+                    st.warning(f"{rem_nome} removido!")
+                    st.rerun()
 
-    with aba_parametros:
-        st.markdown('<div class="titulo-secao">⚙️ Gerenciar Naturezas e Motivos</div>', unsafe_allow_html=True)
-        c_nat, c_mot = st.columns(2)
-        with c_nat:
-            nova_nat = st.text_input("Nova Natureza:", key="input_nova_nat")
-            if st.button("Salvar Natureza", key="btn_salvar_nat") and nova_nat.strip() and engine:
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text("INSERT INTO naturezas (natureza) VALUES (:n) ON CONFLICT (natureza) DO NOTHING"), {"n": nova_nat.strip()})
-                    st.cache_data.clear()
-                    st.success("Natureza salva!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erro: {e}")
-            st.write("Atuais:", lista_naturezas)
-            
-        with c_mot:
-            novo_mot = st.text_input("Novo Motivo:", key="input_novo_mot")
-            if st.button("Salvar Motivo", key="btn_salvar_mot") and novo_mot.strip() and engine:
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text("INSERT INTO motivos (motivo) VALUES (:m) ON CONFLICT (motivo) DO NOTHING"), {"m": novo_mot.strip()})
-                    st.cache_data.clear()
-                    st.success("Motivo salvo!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erro: {e}")
-            st.write("Atuais:", lista_motivos)
+    with aba_regras:
+        st.markdown('<div class="titulo-secao">⚙️ Configurar Motivos, Prioridades e % de Perda na Variável</div>', unsafe_allow_html=True)
+        st.caption("💡 Dê **dois cliques** em qualquer célula da tabela abaixo para alterar a **Prioridade (Alta, Média, Baixa)**, se **Impacta_RV (Sim/Não)**, ou a **% de perda na 1ª ocorrência (ex: 20%) e em 2+ ocorrências (ex: 100%)**.")
+
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns([3, 1.5, 1.2, 1.2, 1.2])
+        n_mot = col_m1.text_input("Novo Motivo:")
+        n_prio = col_m2.selectbox("Prioridade:", ["Alta", "Média", "Baixa", "Positivo"])
+        n_rv = col_m3.selectbox("Afeta RV?", ["Sim", "Não"])
+        n_p1 = col_m4.number_input("% 1ª Ocorr:", min_value=0, max_value=100, value=20 if n_rv == "Sim" else 0, step=10)
+        n_p2 = col_m5.number_input("% 2+ Ocorr:", min_value=0, max_value=100, value=100 if n_rv == "Sim" else 0, step=10)
+
+        if st.button("➕ Adicionar Novo Motivo", use_container_width=True) and n_mot.strip() and engine:
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    INSERT INTO motivos (motivo, prioridade, impacta_rv, perda_1_ocorr, perda_2_ou_mais)
+                    VALUES (:m, :pr, :rv, :p1, :p2)
+                    ON CONFLICT (motivo) DO UPDATE
+                    SET prioridade = :pr, impacta_rv = :rv, perda_1_ocorr = :p1, perda_2_ou_mais = :p2
+                """), {"m": n_mot.strip().upper(), "pr": n_prio, "rv": n_rv, "p1": int(n_p1), "p2": int(n_p2)})
+            st.cache_data.clear()
+            st.success("Motivo adicionado!")
+            st.rerun()
+
+        df_mot_editado = st.data_editor(
+            df_motivos,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Prioridade": st.column_config.SelectboxColumn("Prioridade", options=["Alta", "Média", "Baixa", "Positivo"], required=True),
+                "Impacta_RV": st.column_config.SelectboxColumn("Afeta Variável?", options=["Sim", "Não"], required=True),
+                "Perda_1_Ocorr_%": st.column_config.NumberColumn("% Perda (1ª Vez)", min_value=0, max_value=100, step=10),
+                "Perda_2_Mais_%": st.column_config.NumberColumn("% Perda (2+ Vezes)", min_value=0, max_value=100, step=10),
+            }
+        )
+
+        if st.button("💾 Salvar Alterações na Tabela de Motivos e Regras", type="primary", use_container_width=True) and engine:
+            dados_m = []
+            for _, row in df_mot_editado.iterrows():
+                nome_m = str(row.get("Motivo", "")).strip()
+                if nome_m and nome_m.lower() != "none":
+                    dados_m.append({
+                        "m": nome_m,
+                        "pr": str(row.get("Prioridade", "Média")),
+                        "rv": str(row.get("Impacta_RV", "Não")),
+                        "p1": int(row.get("Perda_1_Ocorr_%", 0)) if pd.notna(row.get("Perda_1_Ocorr_%")) else 0,
+                        "p2": int(row.get("Perda_2_Mais_%", 0)) if pd.notna(row.get("Perda_2_Mais_%")) else 0
+                    })
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM motivos"))
+                if dados_m:
+                    conn.execute(text("""
+                        INSERT INTO motivos (motivo, prioridade, impacta_rv, perda_1_ocorr, perda_2_ou_mais)
+                        VALUES (:m, :pr, :rv, :p1, :p2)
+                        ON CONFLICT (motivo) DO UPDATE
+                        SET prioridade = :pr, impacta_rv = :rv, perda_1_ocorr = :p1, perda_2_ou_mais = :p2
+                    """), dados_m)
+            st.cache_data.clear()
+            st.success("✅ Regras de motivos e porcentagens da variável atualizadas!")
+            st.rerun()
 
     with aba_limpar:
-        st.markdown('<div class="titulo-secao">🧹 Limpeza de Base</div>', unsafe_allow_html=True)
-        st.warning("Atenção: Esta ação apaga todas as ocorrências cadastradas na nuvem.")
-        if st.button("🗑️ Zerar Ocorrências na Nuvem", key="btn_zerar_nuvem") and engine:
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("DELETE FROM ocorrencias"))
-                st.cache_data.clear()
-                st.success("✅ Ocorrências zeradas no banco!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro: {e}")
+        st.warning("Atenção: Esta ação apaga todas as ocorrências registradas no banco de dados.")
+        if st.button("🗑️ Zerar Todas as Ocorrências na Nuvem") and engine:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM ocorrencias"))
+                conn.execute(text("DELETE FROM ocorrencias_anexos"))
+            st.cache_data.clear()
+            st.success("Base de ocorrências limpa!")
+            st.rerun()
