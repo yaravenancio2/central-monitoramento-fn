@@ -7,7 +7,6 @@ from sqlalchemy import create_engine, text
 import base64
 import io
 
-# Tenta importar Pillow para compressão automática de imagens anexadas
 try:
     from PIL import Image
     HAS_PIL = True
@@ -55,20 +54,19 @@ st.markdown("""
 
 # ================= 1. CONEXÃO DE ALTA PERFORMANCE COM AUTO-MIGRAÇÃO =================
 MOTIVOS_OFICIAIS_PADRAO = [
-    # INCIDÊNCIAS QUE AFETAM A VARIÁVEL (R$ 250,00)
     {"motivo": "FALTA COLABORADOR", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
-    {"motivo": "ADVERTÊNCIA", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "ADVERTENCIA", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
     {"motivo": "SINISTRO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
-    {"motivo": "MULTA DE TRÂNSITO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
+    {"motivo": "MULTA DE TRANSITO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 100, "p2": 100},
     {"motivo": "DEVOLUÇÃO", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 20, "p2": 100},
     {"motivo": "PENDÊNCIA", "prioridade": "Alta", "impacta_rv": "Sim", "p1": 20, "p2": 100},
     {"motivo": "ACERTO CORRETO", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
-    {"motivo": "CHECKLIST DIÁRIO (SAÍDA)", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "CHECKLIST DIÁRIO", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
     {"motivo": "ROTEIRIZADOR (BAIXAS, CANHOTOS, CHECK IN E CHECK OUT)", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
     {"motivo": "REGISTRO JORNADA E SOLIDES", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
-    {"motivo": "CHECK LIST HIGIENIZAÇÃO (RETORNO)", "prioridade": "Baixa", "impacta_rv": "Sim", "p1": 20, "p2": 100},
+    {"motivo": "CHECK LIST HIGIENIZAÇÃO", "prioridade": "Baixa", "impacta_rv": "Sim", "p1": 20, "p2": 100},
     {"motivo": "DEVOLUÇÃO DOS PALETES", "prioridade": "Média", "impacta_rv": "Sim", "p1": 20, "p2": 100},
-    # MOTIVOS OPERACIONAIS / COMPORTAMENTAIS (NÃO AFETAM A VARIÁVEL, MAS ENTRAM NO DOSSIÊ E CADÊNCIA)
+    # Operacionais / Comportamentais
     {"motivo": "ATRASO NA SAÍDA / HORÁRIO LIMITE NO CLIENTE", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
     {"motivo": "POSTURA INADEQUADA NO CLIENTE OU COM A TORRE", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
     {"motivo": "NÃO SEGUIU ROTA PLANEJADA", "prioridade": "Média", "impacta_rv": "Não", "p1": 0, "p2": 0},
@@ -88,7 +86,6 @@ def get_engine():
             pool_recycle=300
         )
         with eng.begin() as conn:
-            # Garante tabelas principais
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS colaboradores (
                     id SERIAL PRIMARY KEY,
@@ -128,7 +125,6 @@ def get_engine():
                     dados_base64 TEXT
                 );
             """))
-            # Auto-migração para tabelas já existentes
             conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS prioridade VARCHAR(30) DEFAULT 'Média'"))
             conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS impacta_rv VARCHAR(10) DEFAULT 'Não'"))
             conn.execute(text("ALTER TABLE motivos ADD COLUMN IF NOT EXISTS perda_1_ocorr INT DEFAULT 0"))
@@ -137,8 +133,8 @@ def get_engine():
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS prioridade VARCHAR(30) DEFAULT 'Média'"))
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS impacta_rv VARCHAR(10) DEFAULT 'Não'"))
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS tem_anexo VARCHAR(10) DEFAULT 'Não'"))
+            conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS registrado_por VARCHAR(100)"))
 
-            # Garante que os 12 motivos oficiais da variável existam no banco
             for m in MOTIVOS_OFICIAIS_PADRAO:
                 conn.execute(text("""
                     INSERT INTO motivos (motivo, prioridade, impacta_rv, perda_1_ocorr, perda_2_ou_mais)
@@ -152,7 +148,47 @@ def get_engine():
 
 engine = get_engine()
 
-# ================= 2. FUNÇÕES DE LEITURA EM CACHE =================
+# ================= 2. CONTROLE DE AUTENTICAÇÃO (LOGIN SEGURO) =================
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+    st.session_state["usuario"] = None
+
+if not st.session_state["autenticado"]:
+    st.markdown("<h2 style='text-align: center;'>🚛 Central de Monitoramento & RV - FN Distribuidora</h2>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align: center; color: #94a3b8;'>Faça login com suas credenciais para acessar o sistema</h4>", unsafe_allow_html=True)
+    
+    col_l1, col_l2, col_l3 = st.columns([1, 1.2, 1])
+    with col_l2:
+        with st.form("form_login_seguro"):
+            user_escolhido = st.selectbox(
+                "Selecionar Usuário:", 
+                ["Torre de Monitoramento", "Gleidiene (Manutenção)", "Breno (Manutenção)", "Gestão / Admin"]
+            )
+            senha_digitada = st.text_input("Senha de Acesso:", type="password")
+            submitted = st.form_submit_button("Entrar no Sistema", use_container_width=True, type="primary")
+            
+            if submitted:
+                # Dicionário de senhas dos usuários
+                senhas_cadastradas = {
+                    "Torre de Monitoramento": "torre123",
+                    "Gleidiene (Manutenção)": "manut123",
+                    "Breno (Manutenção)": "manut123",
+                    "Gestão / Admin": "gestao123"
+                }
+                
+                if senha_digitada == senhas_cadastradas.get(user_escolhido):
+                    st.session_state["autenticado"] = True
+                    st.session_state["usuario"] = user_escolhido
+                    st.success("Login realizado com sucesso!")
+                    st.rerun()
+                else:
+                    st.error("❌ Senha incorreta. Tente novamente.")
+    st.stop() # Interrompe a execução do app até que o login seja efetuado
+
+# Recupera o usuário logado com segurança na sessão
+usuario_logado = st.session_state["usuario"]
+
+# ================= 3. FUNÇÕES DE LEITURA EM CACHE =================
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_colaboradores():
     if engine:
@@ -208,7 +244,6 @@ def carregar_dados():
             df_o = pd.read_sql(query, engine)
             if not df_o.empty:
                 df_o.columns = colunas
-                # Padroniza prioridades antigas caso existam registros legados
                 mapa_legado = {
                     "Negligência Grave": "Alta",
                     "Devolução por Falha": "Alta",
@@ -223,9 +258,8 @@ def carregar_dados():
             pass
     return pd.DataFrame(columns=colunas)
 
-# ================= 3. FUNÇÕES AUXILIARES (ANEXOS LEVES E CÁLCULO DE RV) =================
+# ================= 4. FUNÇÕES AUXILIARES =================
 def comprimir_e_codificar_arquivo(uploaded_file):
-    """Comprime imagens automaticamente para ~40KB no banco ou limita PDFs leves."""
     if uploaded_file is None:
         return None, None, None
     nome = uploaded_file.name
@@ -247,7 +281,7 @@ def comprimir_e_codificar_arquivo(uploaded_file):
         except Exception:
             bytes_finais = bytes_brutos
     else:
-        if len(bytes_brutos) > 1024 * 1024:  # Limite de 1MB para PDFs
+        if len(bytes_brutos) > 1024 * 1024:
             return "ERRO_TAMANHO", None, None
         bytes_finais = bytes_brutos
 
@@ -265,10 +299,6 @@ def buscar_anexo_no_banco(id_ocorr):
     return None, None, None
 
 def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos):
-    """
-    Calcula o Laudo de Remuneração Variável (R$ 250,00) para todos os colaboradores.
-    Apenas ocorrências com Status == 'Validado (Impacta RV)' entram no desconto financeiro.
-    """
     regras_dict = {}
     for _, r in df_regras_motivos.iterrows():
         regras_dict[r["Motivo"]] = {
@@ -277,7 +307,6 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
             "p2": int(r["Perda_2_Mais_%"])
         }
 
-    # Filtra apenas ocorrências validadas pelo gestor que impactam RV
     if not df_ocorr_periodo.empty:
         df_rv_validas = df_ocorr_periodo[df_ocorr_periodo["Status"] == "Validado (Impacta RV)"].copy()
         df_pendentes = df_ocorr_periodo[
@@ -290,6 +319,13 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
         df_pendentes = pd.DataFrame()
         df_abonadas = pd.DataFrame()
 
+    colunas_oficiais_rv = [
+        "FALTA COLABORADOR", "ADVERTENCIA", "SINISTRO", "ACERTO CORRETO",
+        "CHECKLIST DIÁRIO", "ROTEIRIZADOR (BAIXAS, CANHOTOS, CHECK IN E CHECK OUT)",
+        "REGISTRO JORNADA E SOLIDES", "CHECK LIST HIGIENIZAÇÃO",
+        "DEVOLUÇÃO DOS PALETES", "DEVOLUÇÃO", "PENDÊNCIA", "MULTA DE TRANSITO"
+    ]
+
     resultado = []
     lista_efetivo = df_colaboradores.to_dict("records") if not df_colaboradores.empty else []
 
@@ -300,6 +336,9 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
         ocorr_colab = df_rv_validas[df_rv_validas["Colaborador"] == nome] if not df_rv_validas.empty else pd.DataFrame()
         pend_colab = len(df_pendentes[df_pendentes["Colaborador"] == nome]) if not df_pendentes.empty else 0
         abon_colab = len(df_abonadas[df_abonadas["Colaborador"] == nome]) if not df_abonadas.empty else 0
+
+        contagem_incidencias = {col: 0 for col in colunas_oficiais_rv}
+        contagem_incidencias["DIVERSOS"] = 0
 
         perda_pct_total = 0
         detalhes_motivos = []
@@ -315,6 +354,16 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
                 perda_pct_total += perda_mot
                 detalhes_motivos.append(f"{mot} ({qtd}x -> -{perda_mot}%)")
 
+                mot_upper = mot.upper()
+                encontrou = False
+                for col_oficial in colunas_oficiais_rv:
+                    if col_oficial in mot_upper or mot_upper in col_oficial:
+                        contagem_incidencias[col_oficial] += qtd
+                        encontrou = True
+                        break
+                if not encontrou:
+                    contagem_incidencias["DIVERSOS"] += qtd
+
         perda_pct_final = min(100, perda_pct_total)
         valor_desconto = round(VALOR_BASE_RV * (perda_pct_final / 100.0), 2)
         valor_receber = round(VALOR_BASE_RV - valor_desconto, 2)
@@ -326,19 +375,23 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
         else:
             status_rv = "🔴 Perda Total (R$ 0)"
 
-        resultado.append({
-            "Colaborador": nome,
-            "Função": funcao,
-            "Ocorrências RV (Validadas)": len(ocorr_colab),
-            "Abonadas / Justificadas": abon_colab,
-            "Pendentes Análise": pend_colab,
-            "Detalhamento de Incidências RV": " | ".join(detalhes_motivos) if detalhes_motivos else "Nenhuma incidência validada",
-            "% Perda RV": perda_pct_final,
-            "Valor Base (R$)": VALOR_BASE_RV,
-            "Desconto (R$)": valor_desconto,
-            "Valor a Pagar (R$)": valor_receber,
-            "Status Elegibilidade": status_rv
+        linha_dict = {
+            "COLABORADOR": nome,
+            "FUNÇÃO": funcao,
+        }
+        for col_oficial in colunas_oficiais_rv:
+            linha_dict[col_oficial] = contagem_incidencias[col_oficial]
+        linha_dict["DIVERSOS"] = contagem_incidencias["DIVERSOS"]
+
+        linha_dict.update({
+            "DETALHAMENTO DE INCIDENCIAS RV": " | ".join(detalhes_motivos) if detalhes_motivos else "Nenhuma incidência validada",
+            "PENDENTES ANÁLISE": pend_colab,
+            "% PERDA RV": perda_pct_final,
+            "DESCONTO R$": valor_desconto,
+            "VALOR A PAGAR R$": valor_receber,
+            "STATUS ELEGIBILIDADE": status_rv
         })
+        resultado.append(linha_dict)
 
     return pd.DataFrame(resultado)
 
@@ -351,25 +404,30 @@ mapa_rv_motivo = dict(zip(df_motivos["Motivo"], df_motivos["Impacta_RV"]))
 
 df = carregar_dados()
 
-# Converte datas de forma segura para filtros e gráficos de cadência
 if not df.empty:
     df["Data_DT"] = pd.to_datetime(df["Data"], dayfirst=True, errors="coerce")
-    # Caso alguma data esteja em formato YYYY-MM-DD
     mask_na = df["Data_DT"].isna()
     if mask_na.any():
         df.loc[mask_na, "Data_DT"] = pd.to_datetime(df.loc[mask_na, "Data"], errors="coerce")
 else:
     df["Data_DT"] = pd.Series(dtype="datetime64[ns]")
 
-# ================= BARRA LATERAL (NAVEGAÇÃO E FILTROS GLOBAIS) =================
+# ================= BARRA LATERAL (NAVEGAÇÃO E SESSÃO DO USUÁRIO) =================
 st.sidebar.markdown("## 🚛 Central FN Distribuidora")
-st.sidebar.caption("Gestão de Prioridades, Tratativas & Remuneração Variável")
+st.sidebar.markdown(f"👤 **Logado como:** `{usuario_logado}`")
 
+# Botão de Logout seguro
+if st.sidebar.button("🚪 Sair do Sistema (Logout)", use_container_width=True):
+    st.session_state["autenticado"] = False
+    st.session_state["usuario"] = None
+    st.rerun()
+
+st.sidebar.markdown("---")
 pagina = st.sidebar.radio(
     "Navegação do Sistema:",
     [
         "📊 Dashboard & Cadências",
-        "🚨 Registrar Ocorrência (Torre)",
+        "🚨 Registrar Ocorrência (Torre / Manutenção)",
         "⚖️ Mesa do Gestor & Backlog",
         "💰 Laudo Remuneração Variável",
         "📁 Dossiê 360º do Colaborador",
@@ -385,7 +443,6 @@ funcao_filtro = st.sidebar.multiselect(
     default=["Motorista", "Ajudante"]
 )
 
-# Filtro de Período Global
 hoje = date.today()
 inicio_mes = date(hoje.year, hoje.month, 1)
 usar_filtro_data = st.sidebar.checkbox("Filtrar por Período", value=False)
@@ -396,7 +453,6 @@ if usar_filtro_data:
 else:
     dt_ini, dt_fim = None, None
 
-# Aplica filtros ao DataFrame principal
 df_filtrado = df[df["Funcao"].isin(funcao_filtro)].copy() if not df.empty else df.copy()
 if usar_filtro_data and not df_filtrado.empty and df_filtrado["Data_DT"].notna().any():
     df_filtrado = df_filtrado[
@@ -417,7 +473,6 @@ CORES_PRIORIDADE = {
 if pagina == "📊 Dashboard & Cadências":
     st.markdown("## 📊 Painel Executivo: Prioridades, Tratativas & Cadências")
 
-    # Separa ocorrências validadas (que contam para % Alta/Média/Baixa) das pendentes e abonadas
     if not df_filtrado.empty:
         df_validadas = df_filtrado[df_filtrado["Status"].isin([
             "Validado (Impacta RV)",
@@ -431,7 +486,6 @@ if pagina == "📊 Dashboard & Cadências":
         qtd_pendentes = 0
         qtd_abonadas = 0
 
-    # Cálculo das % de Prioridade sobre as ocorrências validadas negativas (Alta, Média, Baixa)
     df_prio_neg = df_validadas[df_validadas["Prioridade"].isin(["Alta", "Média", "Baixa"])] if not df_validadas.empty else pd.DataFrame()
     total_prio = len(df_prio_neg)
 
@@ -443,7 +497,6 @@ if pagina == "📊 Dashboard & Cadências":
     pct_media = (qtd_media / total_prio * 100) if total_prio > 0 else 0.0
     pct_baixa = (qtd_baixa / total_prio * 100) if total_prio > 0 else 0.0
 
-    # --- FAIXA DE KPIS ---
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
         st.markdown(f"""<div class="kpi-card">
@@ -478,7 +531,6 @@ if pagina == "📊 Dashboard & Cadências":
             <div class="kpi-sub">💰 {qtd_rv_conf} Afetam RV | 📋 {qtd_op_conf} Sem RV</div>
         </div>""", unsafe_allow_html=True)
 
-    # --- BLOCO 1: GRÁFICOS DE CADÊNCIA TEMPORAL (DIÁRIA / SEMANAL / MENSAL) ---
     st.markdown('<div class="titulo-secao">📈 1. Análise de Cadência (Evolução de Prioridades e Tratativas no Tempo)</div>', unsafe_allow_html=True)
     if not df_filtrado.empty and df_filtrado["Data_DT"].notna().any():
         col_cad_op, _ = st.columns([2, 3])
@@ -502,7 +554,6 @@ if pagina == "📊 Dashboard & Cadências":
         g_cad1, g_cad2 = st.columns(2)
 
         with g_cad1:
-            # Cadência por Nível de Prioridade
             df_cad_prio = df_cad.groupby(["Ordem", "Periodo", "Prioridade"]).size().reset_index(name="Quantidade").sort_values("Ordem")
             fig_cad_prio = px.bar(
                 df_cad_prio,
@@ -518,7 +569,6 @@ if pagina == "📊 Dashboard & Cadências":
             st.plotly_chart(fig_cad_prio, use_container_width=True)
 
         with g_cad2:
-            # Cadência de Tratativas do Gestor (Afeta RV vs Sem RV vs Abonadas vs Pendentes)
             df_cad_status = df_cad.groupby(["Ordem", "Periodo", "Status"]).size().reset_index(name="Quantidade").sort_values("Ordem")
             cores_status = {
                 "Validado (Impacta RV)": "#EF4444",
@@ -541,7 +591,6 @@ if pagina == "📊 Dashboard & Cadências":
     else:
         st.info("Ainda não há dados no período selecionado para gerar os gráficos de cadência.")
 
-    # --- BLOCO 2: MATRIZ DE % DOS MOTORISTAS FRENTE ÀS PRIORIDADES ---
     st.markdown('<div class="titulo-secao">🎯 2. % dos Motoristas Frente às Prioridades (Alta, Média e Baixa)</div>', unsafe_allow_html=True)
     if not df_prio_neg.empty:
         modo_visao_mot = st.radio(
@@ -600,7 +649,6 @@ if pagina == "📊 Dashboard & Cadências":
     else:
         st.info("Nenhuma ocorrência validada (Alta, Média ou Baixa) para exibir a matriz percentual por colaborador.")
 
-    # --- BLOCO 3: MOTIVOS (COM RV VS SEM RV) E GOVERNANÇA ---
     st.markdown('<div class="titulo-secao">🔍 3. Incidências por Motivo (Afeta RV vs Operacional Sem RV)</div>', unsafe_allow_html=True)
     if not df_filtrado.empty:
         g_inf1, g_inf2 = st.columns([3, 2])
@@ -641,11 +689,17 @@ if pagina == "📊 Dashboard & Cadências":
 
 
 # ==============================================================================
-# PÁGINA 2: REGISTRAR OCORRÊNCIA (TORRE DE MONITORAMENTO)
+# PÁGINA 2: REGISTRAR OCORRÊNCIA (TORRE / MANUTENÇÃO TRAVADA)
 # ==============================================================================
-elif pagina == "🚨 Registrar Ocorrência (Torre)":
-    st.markdown("## 🚨 Novo Apontamento Operacional (Torre / Monitoramento)")
-    st.caption("Registre o apontamento abaixo. Ele entrará como **'Pendente de Validação'** para que o gestor valide o impacto na variável ou registre a tratativa.")
+elif pagina == "🚨 Registrar Ocorrência (Torre / Manutenção)":
+    is_manutencao = "Manutenção" in usuario_logado
+
+    if is_manutencao:
+        st.markdown(f"## 🔧 Novo Apontamento - Manutenção ({usuario_logado})")
+        st.info("🔒 **Modo Manutenção Ativo:** Seu perfil está restrito exclusivamente a registros de ocorrências do tipo **CHECKLIST**. O apontamento será enviado diretamente para a validação do gestor.")
+    else:
+        st.markdown(f"## 🚨 Novo Apontamento Operacional (Torre / {usuario_logado})")
+        st.caption("Registre o apontamento abaixo. Ele entrará como **'Pendente de Validação'** para análise do gestor.")
 
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
@@ -658,10 +712,18 @@ elif pagina == "🚨 Registrar Ocorrência (Torre)":
 
     with col_f2:
         data_ocorr = st.date_input("Data do Ocorrido:", value=date.today())
-        rota_ocorr = st.text_input("Rota / Placa / Cidade:", placeholder="Ex: Rota Varginha / Sul de Minas")
+        rota_ocorr = st.text_input("Rota / Placa / Veículo:", placeholder="Ex: Placa ABC-1234 / Rota Varginha")
 
     with col_f3:
-        motivo_sel = st.selectbox("Motivo / Incidência:", lista_motivos)
+        if is_manutencao:
+            # Trava estritamente para checklists
+            lista_motivos_disponiveis = [m for m in lista_motivos if "CHECKLIST" in m.upper() or "CHECK LIST" in m.upper()]
+            if not lista_motivos_disponiveis:
+                lista_motivos_disponiveis = ["CHECKLIST DIÁRIO", "CHECK LIST HIGIENIZAÇÃO"]
+            motivo_sel = st.selectbox("Motivo / Incidência (Restrito Manutenção):", lista_motivos_disponiveis)
+        else:
+            motivo_sel = st.selectbox("Motivo / Incidência:", lista_motivos)
+
         prio_sugerida = mapa_prioridade_motivo.get(motivo_sel, "Média")
         rv_sugerido = mapa_rv_motivo.get(motivo_sel, "Não")
 
@@ -671,8 +733,10 @@ elif pagina == "🚨 Registrar Ocorrência (Torre)":
 
     st.info(f"📌 **Classificação Automática do Motivo:** Prioridade **{prio_sel}** | Afeta Remuneração Variável? **{rv_sugerido}**")
 
-    detalhe_ocorr = st.text_area("Descrição Detalhada do Fato (Torre):", height=100, placeholder="Descreva o que aconteceu, número de NF, cliente, horário...")
-    reg_por = st.text_input("Registrado por (Operador da Torre / Gestão):", value="Torre de Monitoramento")
+    detalhe_ocorr = st.text_area("Descrição Detalhada do Fato / Falha constatada:", height=100, placeholder="Descreva o problema encontrado no checklist...")
+    
+    # Registrado por automático atrelado ao login seguro da sessão
+    reg_por = st.text_input("Registrado por (Login Autenticado):", value=usuario_logado, disabled=True)
 
     if st.button("✅ Registrar Apontamento no Sistema", use_container_width=True, type="primary"):
         if engine:
@@ -702,12 +766,12 @@ elif pagina == "🚨 Registrar Ocorrência (Torre)":
                         "mot": motivo_sel,
                         "det": detalhe_ocorr.strip(),
                         "status": "Pendente de Validação",
-                        "reg": reg_por.strip(),
+                        "reg": usuario_logado.strip(),
                         "prio": prio_sel,
                         "rv": rv_sugerido
                     })
                 st.cache_data.clear()
-                st.success(f"✅ Ocorrência #{novo_id} registrada com sucesso! Enviada para a Mesa do Gestor.")
+                st.success(f"✅ Ocorrência #{novo_id} registrada por **{usuario_logado}** com sucesso! Enviada para a Mesa do Gestor.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro ao salvar ocorrência: {e}")
@@ -732,7 +796,7 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
             st.success("🎉 Tudo em dia! Não há nenhuma ocorrência pendente de validação no momento.")
         else:
             st.dataframe(
-                df_pend[["ID", "Data", "Colaborador", "Funcao", "Rota", "Motivo", "Prioridade", "Impacta_RV", "Detalhe"]],
+                df_pend[["ID", "Data", "Colaborador", "Funcao", "Rota", "Motivo", "Prioridade", "Impacta_RV", "Registrado_Por", "Detalhe"]],
                 use_container_width=True,
                 hide_index=True
             )
@@ -743,19 +807,19 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
 
             with c_g1:
                 opcoes_id = df_pend.apply(
-                    lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']} em {r['Data']})", axis=1
+                    lambda r: f"#{r['ID']} - {r['Colaborador']} ({r['Motivo']} por {r['Registrado_Por']})", axis=1
                 ).tolist()
                 sel_item = st.selectbox("Selecione a Ocorrência para Tratar:", opcoes_id)
                 id_escolhido = int(sel_item.split("#")[1].split(" -")[0])
                 linha_atual = df_pend[df_pend["ID"] == id_escolhido].iloc[0]
 
                 st.write(f"**Colaborador:** {linha_atual['Colaborador']}")
+                st.write(f"**Registrado por:** {linha_atual['Registrado_Por']}")
                 st.write(f"**Motivo:** {linha_atual['Motivo']}")
                 st.write(f"**Prioridade Atual:** {linha_atual['Prioridade']} | **Afeta RV?** {linha_atual['Impacta_RV']}")
-                st.caption(f"**Relato da Torre:** {linha_atual['Detalhe']}")
+                st.caption(f"**Relato:** {linha_atual['Detalhe']}")
 
             with c_g2:
-                # Se o motivo originalmente impacta RV, destaca as opções de Aprovar Desconto ou Abonar
                 if linha_atual["Impacta_RV"] == "Sim":
                     opcoes_decisao = [
                         "🔴 Aprovar Impacto -> Vai para o Laudo de Variável (Desconta RV)",
@@ -766,7 +830,7 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
                     opcoes_decisao = [
                         "🔵 Validar Tratativa Operacional (Sem Impacto na RV -> Entra no Dossiê e Cadência)",
                         "🟢 Abonar / Arquivar com Justificativa (Vai para o Backlog de Justificadas)",
-                        "🔴 Forçar Impacto na Variável -> Incluir no Laudo de Variável"
+                        "🔴 Forçar Impacto na Variável -> Entra em DIVERSOS no Laudo de Variável"
                     ]
 
                 decisao_gestor = st.radio("Decisão do Gestor:", opcoes_decisao)
@@ -777,7 +841,7 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
                 )
                 parecer_gestor = st.text_area(
                     "Registro Histórico / Parecer do Gestor (Obrigatório):",
-                    placeholder="Ex: Apresentou atestado médico válido / Orientado em reunião / Confirmada devolução sem contato com a Torre..."
+                    placeholder="Ex: Apresentou atestado médico válido / Orientado em reunião / Confirmada devolução..."
                 )
                 arquivo_anexo = st.file_uploader(
                     "📎 Anexar Comprovante / Atestado / Evidência (Imagem ou PDF leve - Opcional):",
@@ -796,14 +860,16 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
                             novo_rv = "Não"
                         else:
                             novo_status = "Validado (Operacional Sem Impacto RV)"
-                            novo_rv = "Não"
+                            if "Forçar Impacto" in decisao_gestor:
+                                novo_status = "Validado (Impacta RV)"
+                                novo_rv = "Sim"
 
                         tem_anexo_flag = "Não"
                         nome_arq, mime_arq, b64_arq = None, None, None
                         if arquivo_anexo is not None:
                             nome_arq, mime_arq, b64_arq = comprimir_e_codificar_arquivo(arquivo_anexo)
                             if nome_arq == "ERRO_TAMANHO":
-                                st.error("O PDF excede 1 MB. Envie uma foto/print (que o sistema comprime sozinho) ou um PDF menor.")
+                                st.error("O PDF excede 1 MB. Envie uma foto/print ou um PDF menor.")
                                 st.stop()
                             tem_anexo_flag = "Sim"
 
@@ -842,13 +908,13 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
                                         "b64": b64_arq
                                     })
                             st.cache_data.clear()
-                            st.success(f"✅ Ocorrência #{id_escolhido} validada como '{novo_status}'!")
+                            st.success(f"✅ Ocorrência #{id_escolhido} validada com sucesso!")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Erro ao validar ocorrência: {e}")
 
     with aba_backlog:
-        st.markdown('<div class="titulo-secao">🗂️ Backlog de Todas as Ações Tratadas (Com RV, Sem RV e Justificadas)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="titulo-secao">🗂️ Backlog de Todas as Ações Tratadas</div>', unsafe_allow_html=True)
         df_tratadas = df[df["Status"] != "Pendente de Validação"].copy() if not df.empty else pd.DataFrame()
 
         if df_tratadas.empty:
@@ -864,13 +930,12 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
             st.dataframe(
                 df_b_view[[
                     "ID", "Data", "Colaborador", "Motivo", "Prioridade",
-                    "Status", "Impacta_RV", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"
+                    "Status", "Impacta_RV", "Registrado_Por", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"
                 ]],
                 use_container_width=True,
                 hide_index=True
             )
 
-            # Consulta de Anexo sob Demanda (Lazy Loading) ou Exclusão/Reabertura
             col_anx, col_adm = st.columns(2)
             with col_anx:
                 st.markdown("#### 📎 Visualizar / Baixar Anexo de Evidência")
@@ -921,28 +986,26 @@ elif pagina == "⚖️ Mesa do Gestor & Backlog":
 
 
 # ==============================================================================
-# PÁGINA 4: LAUDO OFICIAL DE REMUNERAÇÃO VARIÁVEL (R$ 250,00)
+# PÁGINA 4: LAUDO OFICIAL DE REMUNERAÇÃO VARIÁVEL
 # ==============================================================================
 elif pagina == "💰 Laudo Remuneração Variável":
     st.markdown("## 💰 Laudo de Fechamento da Remuneração Variável (Base: R$ 250,00)")
-    st.caption("Regra Oficial: **20% de perda = -R$ 50,00** | **100% de perda = -R$ 250,00**. Apenas ocorrências **Validadas pelo Gestor com Impacto na RV** descontam da premiação.")
+    st.caption("Regra Oficial: **20% de perda = -R$ 50,00** | **100% de perda = -R$ 250,00**. Apenas ocorrências validadas pelo gestor com impacto na RV compõem o laudo.")
 
     df_colab_filtrado = df_colab[df_colab["Funcao"].isin(funcao_filtro)] if not df_colab.empty else df_colab
     df_laudo = calcular_fechamento_rv(df_filtrado, df_colab_filtrado, df_motivos)
 
-    # Alerta se houver ocorrências de RV ainda não validadas pelo gestor
     pend_rv = df_filtrado[(df_filtrado["Status"] == "Pendente de Validação") & (df_filtrado["Impacta_RV"] == "Sim")] if not df_filtrado.empty else pd.DataFrame()
     if not pend_rv.empty:
         st.warning(f"⚠️ **Atenção antes de fechar a folha:** Existem **{len(pend_rv)} ocorrências que afetam a variável** aguardando aprovação na aba **'⚖️ Mesa do Gestor'**.")
 
     if not df_laudo.empty:
-        total_previsto = df_laudo["Valor Base (R$)"].sum()
-        total_descontos = df_laudo["Desconto (R$)"].sum()
-        total_pagar = df_laudo["Valor a Pagar (R$)"].sum()
+        total_descontos = df_laudo["DESCONTO R$"].sum()
+        total_pagar = df_laudo["VALOR A PAGAR R$"].sum()
 
-        qtd_100 = len(df_laudo[df_laudo["% Perda RV"] == 0])
-        qtd_parcial = len(df_laudo[(df_laudo["% Perda RV"] > 0) & (df_laudo["% Perda RV"] < 100)])
-        qtd_zerado = len(df_laudo[df_laudo["% Perda RV"] == 100])
+        qtd_100 = len(df_laudo[df_laudo["% PERDA RV"] == 0])
+        qtd_parcial = len(df_laudo[(df_laudo["% PERDA RV"] > 0) & (df_laudo["% PERDA RV"] < 100)])
+        qtd_zerado = len(df_laudo[df_laudo["% PERDA RV"] == 100])
 
         k_rv1, k_rv2, k_rv3, k_rv4 = st.columns(4)
         with k_rv1:
@@ -967,51 +1030,10 @@ elif pagina == "💰 Laudo Remuneração Variável":
             st.markdown(f"""<div class="kpi-card" style="border-top: 4px solid #3B82F6;">
                 <div class="kpi-title">💵 Total Líquido a Pagar</div>
                 <div class="kpi-value">R$ {total_pagar:,.2f}</div>
-                <div class="kpi-sub">Economia/Retenção: R$ {total_descontos:,.2f}</div>
+                <div class="kpi-sub">Retenção Total: R$ {total_descontos:,.2f}</div>
             </div>""", unsafe_allow_html=True)
 
-        g_rv1, g_rv2 = st.columns([2, 3])
-        with g_rv1:
-            df_pizza_rv = pd.DataFrame({
-                "Situação": ["🟢 100% Integral (R$ 250)", "🟡 Pagamento Parcial", "🔴 Perda Total (R$ 0)"],
-                "Colaboradores": [qtd_100, qtd_parcial, qtd_zerado]
-            })
-            fig_p_rv = px.pie(
-                df_pizza_rv,
-                names="Situação",
-                values="Colaboradores",
-                hole=0.45,
-                title="Elegibilidade da Frota na Variável",
-                color="Situação",
-                color_discrete_map={
-                    "🟢 100% Integral (R$ 250)": "#10B981",
-                    "🟡 Pagamento Parcial": "#F59E0B",
-                    "🔴 Perda Total (R$ 0)": "#EF4444"
-                }
-            )
-            fig_p_rv.update_layout(template="plotly_dark", height=360)
-            st.plotly_chart(fig_p_rv, use_container_width=True)
-
-        with g_rv2:
-            df_ocorr_rv = df_filtrado[df_filtrado["Status"] == "Validado (Impacta RV)"] if not df_filtrado.empty else pd.DataFrame()
-            if not df_ocorr_rv.empty:
-                df_causas = df_ocorr_rv["Motivo"].value_counts().reset_index()
-                df_causas.columns = ["Incidência", "Ocorrências Validadas"]
-                fig_causas = px.bar(
-                    df_causas.sort_values("Ocorrências Validadas", ascending=True),
-                    y="Incidência",
-                    x="Ocorrências Validadas",
-                    orientation="h",
-                    title="Incidências Validadas que Mais Geraram Desconto na Variável",
-                    text_auto=True,
-                    color_discrete_sequence=["#EF4444"]
-                )
-                fig_causas.update_layout(template="plotly_dark", height=360)
-                st.plotly_chart(fig_causas, use_container_width=True)
-            else:
-                st.info("Nenhum desconto de variável validado no período selecionado.")
-
-        st.markdown('<div class="titulo-secao">📋 Laudo Nominal para Fechamento de Folha / Premiação</div>', unsafe_allow_html=True)
+        st.markdown('<div class="titulo-secao">📋 Matriz Oficial de Fechamento da Remuneração Variável</div>', unsafe_allow_html=True)
         st.dataframe(df_laudo, use_container_width=True, hide_index=True)
 
         csv_laudo = df_laudo.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
@@ -1024,7 +1046,7 @@ elif pagina == "💰 Laudo Remuneração Variável":
 
 
 # ==============================================================================
-# PÁGINA 5: DOSSIÊ 360º DO COLABORADOR (HISTÓRICO COMPLETO COM E SEM RV)
+# PÁGINA 5: DOSSIÊ 360º DO COLABORADOR
 # ==============================================================================
 elif pagina == "📁 Dossiê 360º do Colaborador":
     st.markdown("## 📁 Dossiê 360º do Motorista / Ajudante")
@@ -1035,10 +1057,9 @@ elif pagina == "📁 Dossiê 360º do Colaborador":
     df_hist = df_filtrado[df_filtrado["Colaborador"] == colab_dossie].copy() if not df_filtrado.empty else pd.DataFrame()
     df_laudo_ind = calcular_fechamento_rv(df_filtrado, df_colab[df_colab["Colaborador"] == colab_dossie], df_motivos)
 
-    valor_a_receber = df_laudo_ind["Valor a Pagar (R$)"].iloc[0] if not df_laudo_ind.empty else VALOR_BASE_RV
-    desconto_ind = df_laudo_ind["Desconto (R$)"].iloc[0] if not df_laudo_ind.empty else 0.0
+    valor_a_receber = df_laudo_ind["VALOR A PAGAR R$"].iloc[0] if not df_laudo_ind.empty else VALOR_BASE_RV
+    desconto_ind = df_laudo_ind["DESCONTO R$"].iloc[0] if not df_laudo_ind.empty else 0.0
 
-    # Percentuais individuais de Prioridade (Validadas)
     df_val_ind = df_hist[df_hist["Status"].isin(["Validado (Impacta RV)", "Validado (Operacional Sem Impacto RV)"])] if not df_hist.empty else pd.DataFrame()
     df_prio_ind = df_val_ind[df_val_ind["Prioridade"].isin(["Alta", "Média", "Baixa"])] if not df_val_ind.empty else pd.DataFrame()
     tot_p_ind = len(df_prio_ind)
@@ -1087,27 +1108,27 @@ elif pagina == "📁 Dossiê 360º do Colaborador":
     st.markdown('<div class="titulo-secao">🚨 1. Ocorrências Validadas que Afetaram a Remuneração Variável</div>', unsafe_allow_html=True)
     df_d_rv = df_hist[df_hist["Status"] == "Validado (Impacta RV)"] if not df_hist.empty else pd.DataFrame()
     if not df_d_rv.empty:
-        st.dataframe(df_d_rv[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
+        st.dataframe(df_d_rv[["ID", "Data", "Rota", "Motivo", "Prioridade", "Registrado_Por", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
     else:
         st.success("Nenhuma ocorrência que afete a Remuneração Variável para este colaborador no período.")
 
     st.markdown('<div class="titulo-secao">📋 2. Ocorrências Operacionais Tratadas pelo Gestor (Não Afetam a Variável)</div>', unsafe_allow_html=True)
     df_d_op = df_hist[df_hist["Status"] == "Validado (Operacional Sem Impacto RV)"] if not df_hist.empty else pd.DataFrame()
     if not df_d_op.empty:
-        st.dataframe(df_d_op[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
+        st.dataframe(df_d_op[["ID", "Data", "Rota", "Motivo", "Prioridade", "Registrado_Por", "Detalhe", "Acao_Gestor", "Data_Tratativa"]], use_container_width=True, hide_index=True)
     else:
         st.info("Nenhuma ocorrência operacional sem impacto na variável registrada no período.")
 
     st.markdown('<div class="titulo-secao">🛡️ 3. Histórico de Ocorrências Justificadas / Abonadas pelo Gestor</div>', unsafe_allow_html=True)
     df_d_ab = df_hist[df_hist["Status"] == "Justificado / Abonado"] if not df_hist.empty else pd.DataFrame()
     if not df_d_ab.empty:
-        st.dataframe(df_d_ab[["ID", "Data", "Rota", "Motivo", "Prioridade", "Detalhe", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"]], use_container_width=True, hide_index=True)
+        st.dataframe(df_d_ab[["ID", "Data", "Rota", "Motivo", "Prioridade", "Registrado_Por", "Detalhe", "Acao_Gestor", "Data_Tratativa", "Tem_Anexo"]], use_container_width=True, hide_index=True)
     else:
         st.caption("Nenhum abono/justificativa registrado para este colaborador no período.")
 
 
 # ==============================================================================
-# PÁGINA 6: EQUIPE & PARÂMETROS (MOTIVOS, PRIORIDADES E REGRAS DE RV)
+# PÁGINA 6: EQUIPE & PARÂMETROS
 # ==============================================================================
 elif pagina == "👥 Equipe & Parâmetros":
     st.markdown("## 👥 Gestão de Equipe e Regras da Remuneração Variável")
@@ -1174,7 +1195,7 @@ elif pagina == "👥 Equipe & Parâmetros":
 
     with aba_regras:
         st.markdown('<div class="titulo-secao">⚙️ Configurar Motivos, Prioridades e % de Perda na Variável</div>', unsafe_allow_html=True)
-        st.caption("💡 Dê **dois cliques** em qualquer célula da tabela abaixo para alterar a **Prioridade (Alta, Média, Baixa)**, se **Impacta_RV (Sim/Não)**, ou a **% de perda na 1ª ocorrência (ex: 20%) e em 2+ ocorrências (ex: 100%)**.")
+        st.caption("💡 Dê **dois cliques** em qualquer célula da tabela abaixo para alterar a **Prioridade**, se **Impacta_RV (Sim/Não)**, ou a **% de perda na 1ª e 2+ ocorrências**.")
 
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns([3, 1.5, 1.2, 1.2, 1.2])
         n_mot = col_m1.text_input("Novo Motivo:")
@@ -1230,7 +1251,7 @@ elif pagina == "👥 Equipe & Parâmetros":
                         SET prioridade = :pr, impacta_rv = :rv, perda_1_ocorr = :p1, perda_2_ou_mais = :p2
                     """), dados_m)
             st.cache_data.clear()
-            st.success("✅ Regras de motivos e porcentagens da variável atualizadas!")
+            st.success("✅ Regras de motivos e porcentagens atualizadas!")
             st.rerun()
 
     with aba_limpar:
