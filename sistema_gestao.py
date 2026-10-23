@@ -123,6 +123,14 @@ def carregar_dados():
     colunas = ["ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe", "Pontos", "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por"]
     return pd.DataFrame(columns=colunas)
 
+# Inicializa os dados na memória (O QUE ESTAVA FALTANDO)
+df_colab = carregar_colaboradores()
+lista_naturezas = carregar_naturezas()
+lista_motivos = carregar_motivos()
+df = carregar_dados()
+if "Registrado_Por" not in df.columns and not df.empty:
+    df["Registrado_Por"] = "Torre"
+
 # ================= CONTROLE DE ACESSO (LOGIN) =================
 USUARIOS = {
     "cheila": {"senha": "123", "perfil": "operacao", "nome": "Cheila"},
