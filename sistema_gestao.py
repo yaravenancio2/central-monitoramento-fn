@@ -32,7 +32,7 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
     }
     .block-container {
-        padding-top: 1.5rem;
+        padding-top: 3.5rem !important;
         padding-bottom: 2rem;
         max-width: 98%;
     }
@@ -88,18 +88,20 @@ st.markdown("""
     /* Cabeçalhos de Página */
     .page-header {
         border-bottom: 1px solid #1e293b;
+        padding-top: 4px;
         padding-bottom: 12px;
         margin-bottom: 20px;
     }
     .page-title {
-        font-size: 1.35rem;
+        font-size: 1.4rem;
         font-weight: 700;
         color: #f8fafc;
+        line-height: 1.3;
         margin: 0;
     }
     .page-subtitle {
         font-size: 0.82rem;
-        color: #64748b;
+        color: #94a3b8;
         margin-top: 4px;
     }
     /* Cards de Indicadores (KPIs) */
@@ -255,7 +257,7 @@ def get_engine():
 
 engine = get_engine()
 
-# ================= 2. CONTROLE DE AUTENTICAÇÃO (LOGIN SEGURO) =================
+# ================= 2. CONTROLE DE AUTENTICAÇÃO E PERMISSÕES (RBAC) =================
 usuarios_cadastrados = {
     "Cheila": "torre123",
     "Caroline": "torre123",
@@ -310,6 +312,39 @@ if not st.session_state["autenticado"]:
 
 usuario_logado = st.session_state["usuario"]
 perfil_usuario = mapa_perfis.get(usuario_logado, "Operação")
+
+# Definição estrita de permissões de acesso por perfil
+is_manutencao = (perfil_usuario == "Manutenção / Frota")
+is_gestor = (perfil_usuario in ["Gestão Operacional", "Gestão / PMO"])
+is_diretoria = (perfil_usuario == "Diretoria Executiva")
+
+if is_manutencao:
+    # Gleidiene e Breno veem exclusivamente a tela de registro de ocorrências
+    opcoes_menu = ["02. Registro de Ocorrências"]
+elif is_diretoria:
+    # Diretoria visualiza apenas os painéis de resultados (sem alterar validações)
+    opcoes_menu = [
+        "01. Painel Executivo & Cadências",
+        "04. Fechamento Variável (RV)",
+        "05. Avaliação 360º (Dossiê)"
+    ]
+elif is_gestor:
+    # Gestores possuem acesso total a todos os módulos, incluindo Mesa do Gestor e Parâmetros
+    opcoes_menu = [
+        "01. Painel Executivo & Cadências",
+        "02. Registro de Ocorrências",
+        "03. Validação & Tratativas",
+        "04. Fechamento Variável (RV)",
+        "05. Avaliação 360º (Dossiê)",
+        "06. Cadastros & Parâmetros"
+    ]
+else:
+    # Torre de Controle: registra ocorrências e acompanha painéis, mas não acessa a Mesa do Gestor
+    opcoes_menu = [
+        "01. Painel Executivo & Cadências",
+        "02. Registro de Ocorrências",
+        "05. Avaliação 360º (Dossiê)"
+    ]
 
 # ================= 3. FUNÇÕES DE LEITURA EM CACHE =================
 @st.cache_data(ttl=120, show_spinner=False)
@@ -379,7 +414,6 @@ def carregar_dados():
                 df_o["Prioridade"] = df_o["Prioridade"].replace(mapa_legado)
                 df_o["Prioridade"] = df_o["Prioridade"].apply(lambda x: x if x in ["Alta", "Média", "Baixa", "Positivo"] else "Média")
 
-                # Normaliza medidas de registros antigos que já foram validados
                 def padronizar_medida(row):
                     med = str(row["Medida_Gestor"]).strip()
                     st_atual = str(row["Status"]).strip()
@@ -557,34 +591,30 @@ st.sidebar.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.sidebar.markdown('<div class="nav-label">Módulos do Sistema</div>', unsafe_allow_html=True)
-
-opcoes_menu = [
-    "01. Painel Executivo & Cadências",
-    "02. Registro de Ocorrências",
-    "03. Validação & Tratativas",
-    "04. Fechamento Variável (RV)",
-    "05. Avaliação 360º (Dossiê)",
-    "06. Cadastros & Parâmetros"
-]
-
+st.sidebar.markdown('<div class="nav-label">Módulos Autorizados</div>', unsafe_allow_html=True)
 pagina = st.sidebar.radio("Módulos", opcoes_menu, label_visibility="collapsed")
 
-st.sidebar.markdown('<div class="nav-label">Filtros Globais</div>', unsafe_allow_html=True)
-with st.sidebar.expander("Parâmetros de Filtro", expanded=True):
-    funcao_filtro = st.multiselect(
-        "Cargo:",
-        options=["Motorista", "Ajudante"],
-        default=["Motorista", "Ajudante"]
-    )
-    hoje = date.today()
-    inicio_mes = date(hoje.year, hoje.month, 1)
-    usar_filtro_data = st.checkbox("Filtrar por Período", value=False)
-    if usar_filtro_data:
-        dt_ini = st.date_input("De:", value=inicio_mes)
-        dt_fim = st.date_input("Até:", value=hoje)
-    else:
-        dt_ini, dt_fim = None, None
+# Oculta filtros globais para o perfil Manutenção (pois acessam apenas o formulário de registro)
+if not is_manutencao:
+    st.sidebar.markdown('<div class="nav-label">Filtros Globais</div>', unsafe_allow_html=True)
+    with st.sidebar.expander("Parâmetros de Filtro", expanded=True):
+        funcao_filtro = st.multiselect(
+            "Cargo:",
+            options=["Motorista", "Ajudante"],
+            default=["Motorista", "Ajudante"]
+        )
+        hoje = date.today()
+        inicio_mes = date(hoje.year, hoje.month, 1)
+        usar_filtro_data = st.checkbox("Filtrar por Período", value=False)
+        if usar_filtro_data:
+            dt_ini = st.date_input("De:", value=inicio_mes)
+            dt_fim = st.date_input("Até:", value=hoje)
+        else:
+            dt_ini, dt_fim = None, None
+else:
+    funcao_filtro = ["Motorista", "Ajudante"]
+    usar_filtro_data = False
+    dt_ini, dt_fim = None, None
 
 st.sidebar.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 if st.sidebar.button("Encerrar Sessão", use_container_width=True):
@@ -883,11 +913,9 @@ if pagina == "01. Painel Executivo & Cadências":
 
 
 # ==============================================================================
-# 02. REGISTRO DE OCORRÊNCIAS (TORRE / MANUTENÇÃO)
+# 02. REGISTRO DE OCORRÊNCIAS (COM VÍNCULO DE DUPLA MOTORISTA + AJUDANTE)
 # ==============================================================================
 elif pagina == "02. Registro de Ocorrências":
-    is_manutencao = ("Manutenção" in usuario_logado)
-
     st.markdown(f"""
     <div class="page-header">
         <div class="page-title">Registro de Apontamento Operacional</div>
@@ -896,17 +924,26 @@ elif pagina == "02. Registro de Ocorrências":
     """, unsafe_allow_html=True)
 
     if is_manutencao:
-        st.warning("Perfil Manutenção: Formulário restrito exclusivamente ao apontamento de ocorrências de CHECKLIST.")
+        st.info("Acesso Restrito (Manutenção): Formulário habilitado exclusivamente para apontamentos de CHECKLIST.")
+
+    mapa_funcao_colab = dict(zip(df_colab["Colaborador"], df_colab["Funcao"])) if not df_colab.empty else {"Carlos Eduardo": "Motorista"}
+    lista_nomes = sorted(list(mapa_funcao_colab.keys()))
 
     with st.container():
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
-            lista_nomes = sorted(df_colab["Colaborador"].unique().tolist()) if not df_colab.empty else ["Carlos Eduardo"]
-            colab_sel = st.selectbox("Colaborador:", lista_nomes)
-            func_auto = "Motorista"
-            if not df_colab.empty and colab_sel in df_colab["Colaborador"].values:
-                func_auto = df_colab[df_colab["Colaborador"] == colab_sel]["Funcao"].iloc[0]
-            st.text_input("Cargo:", value=func_auto, disabled=True)
+            colab_sel_1 = st.selectbox("1º Colaborador (Principal):", lista_nomes)
+            func_auto_1 = mapa_funcao_colab.get(colab_sel_1, "Motorista")
+            st.caption(f"Cargo: **{func_auto_1}**")
+
+            # Opção para vincular o 2º colaborador (Dupla Motorista + Ajudante) na mesma ocorrência
+            opcoes_segundo_colab = ["Nenhum (Individual)"] + [
+                f"{n} ({mapa_funcao_colab.get(n, '')})" for n in lista_nomes if n != colab_sel_1
+            ]
+            colab_sel_2_raw = st.selectbox(
+                "2º Colaborador Envolvido (Opcional - Dupla na Rota):",
+                opcoes_segundo_colab
+            )
 
         with col_f2:
             data_ocorr = st.date_input("Data da Ocorrência:", value=date.today())
@@ -937,45 +974,60 @@ elif pagina == "02. Registro de Ocorrências":
         if st.button("Confirmar e Enviar para Validação", use_container_width=True, type="primary"):
             if engine:
                 try:
-                    novo_id = 1
+                    proximo_id = 1
                     if not df.empty and "ID" in df.columns:
-                        novo_id = int(df["ID"].max()) + 1
+                        proximo_id = int(df["ID"].max()) + 1
 
+                    # Monta a lista de envolvidos (1 ou 2 colaboradores)
+                    envolvidos = [(colab_sel_1, func_auto_1)]
+                    if colab_sel_2_raw != "Nenhum (Individual)":
+                        nome_2 = colab_sel_2_raw.rsplit(" (", 1)[0]
+                        func_2 = mapa_funcao_colab.get(nome_2, "Ajudante")
+                        envolvidos.append((nome_2, func_2))
+
+                    ids_gerados = []
                     with engine.begin() as conn:
-                        conn.execute(text("""
-                            INSERT INTO ocorrencias (
-                                id, data, colaborador, funcao, rota, tipo, motivo, detalhe,
-                                pontos, status, acao_gestor, data_tratativa, registrado_por,
-                                prioridade, impacta_rv, tem_anexo, medida_gestor
-                            ) VALUES (
-                                :id, :data, :colab, :func, :rota, :tipo, :mot, :det,
-                                0, 'Pendente de Validação', '', '', :reg,
-                                :prio, :rv, 'Não', 'Pendente de Avaliação'
-                            )
-                        """), {
-                            "id": novo_id,
-                            "data": data_ocorr.strftime("%d/%m/%Y"),
-                            "colab": colab_sel,
-                            "func": func_auto,
-                            "rota": rota_ocorr.strip() if rota_ocorr.strip() else "Não informada",
-                            "tipo": prio_sel,
-                            "mot": motivo_sel,
-                            "det": detalhe_ocorr.strip(),
-                            "reg": usuario_logado.strip(),
-                            "prio": prio_sel,
-                            "rv": rv_sugerido
-                        })
+                        for idx_env, (nome_env, func_env) in enumerate(envolvidos):
+                            id_atual = proximo_id + idx_env
+                            ids_gerados.append(f"#{id_atual} ({nome_env})")
+                            conn.execute(text("""
+                                INSERT INTO ocorrencias (
+                                    id, data, colaborador, funcao, rota, tipo, motivo, detalhe,
+                                    pontos, status, acao_gestor, data_tratativa, registrado_por,
+                                    prioridade, impacta_rv, tem_anexo, medida_gestor
+                                ) VALUES (
+                                    :id, :data, :colab, :func, :rota, :tipo, :mot, :det,
+                                    0, 'Pendente de Validação', '', '', :reg,
+                                    :prio, :rv, 'Não', 'Pendente de Avaliação'
+                                )
+                            """), {
+                                "id": id_atual,
+                                "data": data_ocorr.strftime("%d/%m/%Y"),
+                                "colab": nome_env,
+                                "func": func_env,
+                                "rota": rota_ocorr.strip() if rota_ocorr.strip() else "Não informada",
+                                "tipo": prio_sel,
+                                "mot": motivo_sel,
+                                "det": detalhe_ocorr.strip(),
+                                "reg": usuario_logado.strip(),
+                                "prio": prio_sel,
+                                "rv": rv_sugerido
+                            })
                     st.cache_data.clear()
-                    st.success(f"Registro #{novo_id} gravado e encaminhado para validação gerencial.")
+                    st.success(f"Ocorrência registrada com sucesso para: {', '.join(ids_gerados)}.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar: {e}")
 
 
 # ==============================================================================
-# 03. VALIDAÇÃO DO GESTOR, MEDIDAS DISCIPLINARES & BACKLOG
+# 03. VALIDAÇÃO DO GESTOR, MEDIDAS DISCIPLINARES & BACKLOG (EXCLUSIVO GESTORES)
 # ==============================================================================
 elif pagina == "03. Validação & Tratativas":
+    if not is_gestor:
+        st.error("Acesso não autorizado para o seu perfil.")
+        st.stop()
+
     st.markdown("""
     <div class="page-header">
         <div class="page-title">Mesa de Validação Gerencial & Controle de Tratativas</div>
@@ -1006,7 +1058,7 @@ elif pagina == "03. Validação & Tratativas":
 
             with c_g1:
                 opcoes_id = df_pend.apply(
-                    lambda r: f"#{r['ID']} | {r['Colaborador']} - {r['Motivo']}", axis=1
+                    lambda r: f"#{r['ID']} | {r['Colaborador']} ({r['Funcao']}) - {r['Motivo']}", axis=1
                 ).tolist()
                 sel_item = st.selectbox("Selecionar Registro:", opcoes_id)
                 id_escolhido = int(sel_item.split("#")[1].split(" |")[0])
@@ -1283,7 +1335,6 @@ elif pagina == "05. Avaliação 360º (Dossiê)":
     valor_a_receber = df_laudo_ind["VALOR A PAGAR R$"].iloc[0] if not df_laudo_ind.empty else VALOR_BASE_RV
     desconto_ind = df_laudo_ind["DESCONTO R$"].iloc[0] if not df_laudo_ind.empty else 0.0
 
-    # Separação por status
     df_pend_ind = df_hist[df_hist["Status"] == "Pendente de Validação"] if not df_hist.empty else pd.DataFrame()
     df_val_ind = df_hist[df_hist["Status"].isin(["Validado (Impacta RV)", "Validado (Operacional Sem Impacto RV)"])] if not df_hist.empty else pd.DataFrame()
     df_d_rv = df_hist[df_hist["Status"] == "Validado (Impacta RV)"] if not df_hist.empty else pd.DataFrame()
@@ -1337,7 +1388,6 @@ elif pagina == "05. Avaliação 360º (Dossiê)":
             <div class="kpi-sub">{len(df_d_rv)} RV | {len(df_d_op)} Oper | {len(df_d_ab)} Abonos</div>
         </div>""", unsafe_allow_html=True)
 
-    # Resumo gráfico de Medidas aplicadas ao colaborador
     if not df_hist.empty:
         col_g360_1, col_g360_2 = st.columns([2, 3])
         with col_g360_1:
@@ -1429,7 +1479,6 @@ elif pagina == "05. Avaliação 360º (Dossiê)":
     else:
         st.caption("Nenhum abono registrado para este colaborador no período.")
 
-    # Visualizador de anexos direto no Dossiê 360
     df_anexos_colab = df_hist[df_hist["Tem_Anexo"] == "Sim"] if not df_hist.empty else pd.DataFrame()
     if not df_anexos_colab.empty:
         st.markdown('<div class="section-header">Documentos e Evidências Anexadas ao Prontuário</div>', unsafe_allow_html=True)
@@ -1448,9 +1497,13 @@ elif pagina == "05. Avaliação 360º (Dossiê)":
 
 
 # ==============================================================================
-# 06. CADASTROS & PARÂMETROS
+# 06. CADASTROS & PARÂMETROS (EXCLUSIVO GESTORES)
 # ==============================================================================
 elif pagina == "06. Cadastros & Parâmetros":
+    if not is_gestor:
+        st.error("Acesso não autorizado para o seu perfil.")
+        st.stop()
+
     st.markdown("""
     <div class="page-header">
         <div class="page-title">Configurações de Efetivo & Regras de Negócio</div>
