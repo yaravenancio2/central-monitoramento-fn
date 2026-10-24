@@ -224,7 +224,8 @@ def get_engine():
                     prioridade VARCHAR(30) DEFAULT 'Média',
                     impacta_rv VARCHAR(10) DEFAULT 'Não',
                     tem_anexo VARCHAR(10) DEFAULT 'Não',
-                    medida_gestor VARCHAR(100) DEFAULT 'Pendente'
+                    medida_gestor VARCHAR(100) DEFAULT 'Pendente',
+                    desconto_forcado INT DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS ocorrencias_anexos (
                     id_ocorrencia INT PRIMARY KEY,
@@ -243,6 +244,7 @@ def get_engine():
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS tem_anexo VARCHAR(10) DEFAULT 'Não'"))
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS registrado_por VARCHAR(100)"))
             conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS medida_gestor VARCHAR(100) DEFAULT 'Pendente'"))
+            conn.execute(text("ALTER TABLE ocorrencias ADD COLUMN IF NOT EXISTS desconto_forcado INT DEFAULT 0"))
 
             for m in MOTIVOS_OFICIAIS_PADRAO:
                 conn.execute(text("""
@@ -313,23 +315,19 @@ if not st.session_state["autenticado"]:
 usuario_logado = st.session_state["usuario"]
 perfil_usuario = mapa_perfis.get(usuario_logado, "Operação")
 
-# Definição estrita de permissões de acesso por perfil
 is_manutencao = (perfil_usuario == "Manutenção / Frota")
 is_gestor = (perfil_usuario in ["Gestão Operacional", "Gestão / PMO"])
 is_diretoria = (perfil_usuario == "Diretoria Executiva")
 
 if is_manutencao:
-    # Gleidiene e Breno veem exclusivamente a tela de registro de ocorrências
     opcoes_menu = ["02. Registro de Ocorrências"]
 elif is_diretoria:
-    # Diretoria visualiza apenas os painéis de resultados (sem alterar validações)
     opcoes_menu = [
         "01. Painel Executivo & Cadências",
         "04. Fechamento Variável (RV)",
         "05. Avaliação 360º (Dossiê)"
     ]
 elif is_gestor:
-    # Gestores possuem acesso total a todos os módulos, incluindo Mesa do Gestor e Parâmetros
     opcoes_menu = [
         "01. Painel Executivo & Cadências",
         "02. Registro de Ocorrências",
@@ -339,7 +337,6 @@ elif is_gestor:
         "06. Cadastros & Parâmetros"
     ]
 else:
-    # Torre de Controle: registra ocorrências e acompanha painéis, mas não acessa a Mesa do Gestor
     opcoes_menu = [
         "01. Painel Executivo & Cadências",
         "02. Registro de Ocorrências",
@@ -387,7 +384,7 @@ def carregar_dados():
     colunas = [
         "ID", "Data", "Colaborador", "Funcao", "Rota", "Tipo", "Motivo", "Detalhe",
         "Status", "Acao_Gestor", "Data_Tratativa", "Registrado_Por", "Prioridade",
-        "Impacta_RV", "Tem_Anexo", "Medida_Gestor"
+        "Impacta_RV", "Tem_Anexo", "Medida_Gestor", "Desconto_Forcado"
     ]
     if engine:
         try:
@@ -397,7 +394,8 @@ def carregar_dados():
                        COALESCE(prioridade, tipo, 'Média') AS prioridade,
                        COALESCE(impacta_rv, 'Não') AS impacta_rv,
                        COALESCE(tem_anexo, 'Não') AS tem_anexo,
-                       COALESCE(medida_gestor, 'Pendente') AS medida_gestor
+                       COALESCE(medida_gestor, 'Pendente') AS medida_gestor,
+                       COALESCE(desconto_forcado, 0) AS desconto_forcado
                 FROM ocorrencias
                 ORDER BY id DESC
             """
@@ -426,12 +424,13 @@ def carregar_dados():
                     return med
 
                 df_o["Medida_Gestor"] = df_o.apply(padronizar_medida, axis=1)
+                df_o["Desconto_Forcado"] = pd.to_numeric(df_o["Desconto_Forcado"], errors="coerce").fillna(0).astype(int)
                 return df_o
         except Exception:
             pass
     return pd.DataFrame(columns=colunas)
 
-# ================= 4. FUNÇÕES AUXILIARES =================
+# ================= 4. FUNÇÕES AUXILIARES & CÁLCULO AUDITADO DE RV (0%, 20% OU 100%) =================
 def comprimir_e_codificar_arquivo(uploaded_file):
     if uploaded_file is None:
         return None, None, None
@@ -471,10 +470,46 @@ def buscar_anexo_no_banco(id_ocorr):
             pass
     return None, None, None
 
+def mapear_coluna_oficial_rv(motivo_str):
+    """Mapeia cada motivo para sua coluna oficial da matriz RV ou DIVERSOS."""
+    m = str(motivo_str).strip().upper()
+    if m == "FALTA COLABORADOR":
+        return "FALTA COLABORADOR"
+    if m in ["ADVERTENCIA", "ADVERTÊNCIA"]:
+        return "ADVERTENCIA"
+    if m == "SINISTRO":
+        return "SINISTRO"
+    if m == "ACERTO CORRETO":
+        return "ACERTO CORRETO"
+    if "CHECKLIST DIÁRIO" in m or "CHECKLIST DIARIO" in m:
+        return "CHECKLIST DIÁRIO"
+    if "ROTEIRIZADOR" in m:
+        return "ROTEIRIZADOR (BAIXAS, CANHOTOS, CHECK IN E CHECK OUT)"
+    if "REGISTRO JORNADA" in m or "SOLIDES" in m:
+        return "REGISTRO JORNADA E SOLIDES"
+    if "HIGIENIZAÇÃO" in m or "HIGIENIZACAO" in m:
+        return "CHECK LIST HIGIENIZAÇÃO"
+    if "PALETES" in m:
+        return "DEVOLUÇÃO DOS PALETES"
+    if m in ["DEVOLUÇÃO", "DEVOLUCAO"]:
+        return "DEVOLUÇÃO"
+    if m in ["PENDÊNCIA", "PENDENCIA"]:
+        return "PENDÊNCIA"
+    if "MULTA" in m:
+        return "MULTA DE TRANSITO"
+    return "DIVERSOS"
+
 def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos):
+    """
+    Regra Estrita FN Distribuidora (Base R$ 250,00):
+    - 0 ocorrências validadas c/ impacto RV -> 0% de perda (Recebe R$ 250,00)
+    - 1 ocorrência validada de peso 20% -> 20% de perda (-R$ 50,00 | Recebe R$ 200,00)
+    - 2 ou mais ocorrências validadas (mesmo motivo ou motivos diferentes) OU 1 ocorrência de 100% -> 100% de perda (-R$ 250,00 | Recebe R$ 0,00)
+    Não existe 40%, 60% ou 80%.
+    """
     regras_dict = {}
     for _, r in df_regras_motivos.iterrows():
-        regras_dict[r["Motivo"]] = {
+        regras_dict[str(r["Motivo"]).strip().upper()] = {
             "impacta": r["Impacta_RV"],
             "p1": int(r["Perda_1_Ocorr_%"]),
             "p2": int(r["Perda_2_Mais_%"])
@@ -507,35 +542,48 @@ def calcular_fechamento_rv(df_ocorr_periodo, df_colaboradores, df_regras_motivos
         contagem_incidencias = {col: 0 for col in colunas_oficiais_rv}
         contagem_incidencias["DIVERSOS"] = 0
 
-        perda_pct_total = 0
+        total_ocorr_rv = len(ocorr_colab)
+        tem_ocorr_100 = False
         detalhes_motivos = []
 
         if not ocorr_colab.empty:
-            contagem_por_motivo = ocorr_colab["Motivo"].value_counts().to_dict()
-            for mot, qtd in contagem_por_motivo.items():
-                regra = regras_dict.get(mot, {"impacta": "Sim", "p1": 20, "p2": 100})
-                perda_mot = regra["p1"] if qtd == 1 else regra["p2"]
-                perda_pct_total += perda_mot
-                detalhes_motivos.append(f"{mot} ({qtd}x: -{perda_mot}%)")
+            for _, row_oc in ocorr_colab.iterrows():
+                mot_raw = str(row_oc["Motivo"]).strip()
+                mot_key = mot_raw.upper()
+                col_destino = mapear_coluna_oficial_rv(mot_key)
+                contagem_incidencias[col_destino] += 1
 
-                mot_upper = mot.upper()
-                encontrou = False
-                for col_oficial in colunas_oficiais_rv:
-                    if col_oficial in mot_upper or mot_upper in col_oficial:
-                        contagem_incidencias[col_oficial] += qtd
-                        encontrou = True
-                        break
-                if not encontrou:
-                    contagem_incidencias["DIVERSOS"] += qtd
+                desc_forcado = int(row_oc.get("Desconto_Forcado", 0)) if pd.notna(row_oc.get("Desconto_Forcado")) else 0
+                regra = regras_dict.get(mot_key, {"impacta": "Sim", "p1": 20, "p2": 100})
+                peso_p1 = regra["p1"] if regra["p1"] > 0 else 20
 
-        perda_pct_final = min(100, perda_pct_total)
+                # Se o gestor escolheu 100% ou o motivo tem peso inicial de 100%
+                peso_individual = desc_forcado if desc_forcado in [20, 100] else peso_p1
+                if peso_individual >= 100:
+                    tem_ocorr_100 = True
+
+            # Monta resumo legível das ocorrências
+            for mot_nome, grp in ocorr_colab.groupby("Motivo"):
+                q_m = len(grp)
+                col_d = mapear_coluna_oficial_rv(mot_nome)
+                prefixo = "DIVERSOS: " if col_d == "DIVERSOS" else ""
+                detalhes_motivos.append(f"{prefixo}{mot_nome} ({q_m}x)")
+
+        # Aplicação estrita dos 3 patamares: 0%, 20% (-R$ 50) ou 100% (-R$ 250)
+        if total_ocorr_rv == 0:
+            perda_pct_final = 0
+        elif total_ocorr_rv >= 2 or tem_ocorr_100:
+            perda_pct_final = 100
+        else:
+            perda_pct_final = 20
+
         valor_desconto = round(VALOR_BASE_RV * (perda_pct_final / 100.0), 2)
         valor_receber = round(VALOR_BASE_RV - valor_desconto, 2)
 
         if perda_pct_final == 0:
             status_rv = "100% ELEGÍVEL"
-        elif perda_pct_final < 100:
-            status_rv = f"PARCIAL (-{perda_pct_final}%)"
+        elif perda_pct_final == 20:
+            status_rv = "PARCIAL (-20%)"
         else:
             status_rv = "PERDA TOTAL (0%)"
 
@@ -594,7 +642,6 @@ st.sidebar.markdown(f"""
 st.sidebar.markdown('<div class="nav-label">Módulos Autorizados</div>', unsafe_allow_html=True)
 pagina = st.sidebar.radio("Módulos", opcoes_menu, label_visibility="collapsed")
 
-# Oculta filtros globais para o perfil Manutenção (pois acessam apenas o formulário de registro)
 if not is_manutencao:
     st.sidebar.markdown('<div class="nav-label">Filtros Globais</div>', unsafe_allow_html=True)
     with st.sidebar.expander("Parâmetros de Filtro", expanded=True):
@@ -913,7 +960,7 @@ if pagina == "01. Painel Executivo & Cadências":
 
 
 # ==============================================================================
-# 02. REGISTRO DE OCORRÊNCIAS (COM VÍNCULO DE DUPLA MOTORISTA + AJUDANTE)
+# 02. REGISTRO DE OCORRÊNCIAS (COM VÍNCULO PADRONIZADO DE DUPLA)
 # ==============================================================================
 elif pagina == "02. Registro de Ocorrências":
     st.markdown(f"""
@@ -936,14 +983,17 @@ elif pagina == "02. Registro de Ocorrências":
             func_auto_1 = mapa_funcao_colab.get(colab_sel_1, "Motorista")
             st.caption(f"Cargo: **{func_auto_1}**")
 
-            # Opção para vincular o 2º colaborador (Dupla Motorista + Ajudante) na mesma ocorrência
-            opcoes_segundo_colab = ["Nenhum (Individual)"] + [
-                f"{n} ({mapa_funcao_colab.get(n, '')})" for n in lista_nomes if n != colab_sel_1
-            ]
-            colab_sel_2_raw = st.selectbox(
+            # 2º Colaborador padronizado: apenas o nome no seletor e o cargo logo abaixo
+            opcoes_segundo_colab = ["Nenhum (Individual)"] + [n for n in lista_nomes if n != colab_sel_1]
+            colab_sel_2 = st.selectbox(
                 "2º Colaborador Envolvido (Opcional - Dupla na Rota):",
                 opcoes_segundo_colab
             )
+            if colab_sel_2 != "Nenhum (Individual)":
+                func_auto_2 = mapa_funcao_colab.get(colab_sel_2, "Ajudante")
+                st.caption(f"Cargo: **{func_auto_2}**")
+            else:
+                st.caption("Cargo: **Não aplicável (Lançamento Individual)**")
 
         with col_f2:
             data_ocorr = st.date_input("Data da Ocorrência:", value=date.today())
@@ -978,12 +1028,10 @@ elif pagina == "02. Registro de Ocorrências":
                     if not df.empty and "ID" in df.columns:
                         proximo_id = int(df["ID"].max()) + 1
 
-                    # Monta a lista de envolvidos (1 ou 2 colaboradores)
                     envolvidos = [(colab_sel_1, func_auto_1)]
-                    if colab_sel_2_raw != "Nenhum (Individual)":
-                        nome_2 = colab_sel_2_raw.rsplit(" (", 1)[0]
-                        func_2 = mapa_funcao_colab.get(nome_2, "Ajudante")
-                        envolvidos.append((nome_2, func_2))
+                    if colab_sel_2 != "Nenhum (Individual)":
+                        func_2 = mapa_funcao_colab.get(colab_sel_2, "Ajudante")
+                        envolvidos.append((colab_sel_2, func_2))
 
                     ids_gerados = []
                     with engine.begin() as conn:
@@ -994,11 +1042,11 @@ elif pagina == "02. Registro de Ocorrências":
                                 INSERT INTO ocorrencias (
                                     id, data, colaborador, funcao, rota, tipo, motivo, detalhe,
                                     pontos, status, acao_gestor, data_tratativa, registrado_por,
-                                    prioridade, impacta_rv, tem_anexo, medida_gestor
+                                    prioridade, impacta_rv, tem_anexo, medida_gestor, desconto_forcado
                                 ) VALUES (
                                     :id, :data, :colab, :func, :rota, :tipo, :mot, :det,
                                     0, 'Pendente de Validação', '', '', :reg,
-                                    :prio, :rv, 'Não', 'Pendente de Avaliação'
+                                    :prio, :rv, 'Não', 'Pendente de Avaliação', 0
                                 )
                             """), {
                                 "id": id_atual,
@@ -1099,6 +1147,30 @@ elif pagina == "03. Validação & Tratativas":
                     index=["Alta", "Média", "Baixa", "Positivo"].index(linha_atual["Prioridade"]) if linha_atual["Prioridade"] in ["Alta", "Média", "Baixa", "Positivo"] else 1
                 )
 
+                # Quando o gestor força o impacto na variável (DIVERSOS) ou quer definir o peso (20% ou 100%)
+                desconto_forcado_val = 0
+                if "Forçar Impacto" in decisao_gestor:
+                    escolha_pct = st.radio(
+                        "Percentual de Impacto Forçado na Variável (DIVERSOS):",
+                        ["20% (Desconto de R$ 50,00)", "100% (Perda Total de R$ 250,00)"],
+                        horizontal=True
+                    )
+                    desconto_forcado_val = 100 if "100%" in escolha_pct else 20
+                elif "Validar Impacto" in decisao_gestor:
+                    # Verifica o peso padrão do motivo
+                    mot_upper_atual = str(linha_atual["Motivo"]).strip().upper()
+                    linha_regra = df_motivos[df_motivos["Motivo"].str.upper() == mot_upper_atual]
+                    p1_padrao = int(linha_regra["Perda_1_Ocorr_%"].iloc[0]) if not linha_regra.empty else 20
+                    if p1_padrao == 0:
+                        escolha_pct = st.radio(
+                            "Percentual de Impacto na Variável:",
+                            ["20% (Desconto de R$ 50,00)", "100% (Perda Total de R$ 250,00)"],
+                            horizontal=True
+                        )
+                        desconto_forcado_val = 100 if "100%" in escolha_pct else 20
+                    else:
+                        desconto_forcado_val = p1_padrao
+
                 parecer_gestor = st.text_area(
                     "4. Detalhamento da Tratativa / Parecer Gerencial (Obrigatório):",
                     placeholder="Descreva a tratativa realizada, motivo do abono ou termos da advertência/feedback..."
@@ -1118,9 +1190,11 @@ elif pagina == "03. Validação & Tratativas":
                         elif "Abonar" in decisao_gestor:
                             novo_status = "Justificado / Abonado"
                             novo_rv = "Não"
+                            desconto_forcado_val = 0
                         else:
                             novo_status = "Validado (Operacional Sem Impacto RV)"
                             novo_rv = "Não"
+                            desconto_forcado_val = 0
 
                         tem_anexo_flag = "Não"
                         nome_arq, mime_arq, b64_arq = None, None, None
@@ -1142,7 +1216,8 @@ elif pagina == "03. Validação & Tratativas":
                                         tipo = :prio,
                                         impacta_rv = :rv,
                                         tem_anexo = :anexo,
-                                        medida_gestor = :med
+                                        medida_gestor = :med,
+                                        desconto_forcado = :df
                                     WHERE id = :id
                                 """), {
                                     "st": novo_status,
@@ -1152,6 +1227,7 @@ elif pagina == "03. Validação & Tratativas":
                                     "rv": novo_rv,
                                     "anexo": tem_anexo_flag,
                                     "med": medida_aplicada,
+                                    "df": int(desconto_forcado_val),
                                     "id": id_escolhido
                                 })
 
@@ -1257,7 +1333,7 @@ elif pagina == "04. Fechamento Variável (RV)":
     st.markdown("""
     <div class="page-header">
         <div class="page-title">Laudo de Apuração da Remuneração Variável</div>
-        <div class="page-subtitle">Base de Cálculo: R$ 250,00 | Penalidades: 20% (R$ 50,00) ou 100% (R$ 250,00) conforme matriz de incidências validadas</div>
+        <div class="page-subtitle">Base: R$ 250,00 | Regra Oficial: 1 ocorrência de 20% = -R$ 50,00 (Recebe R$ 200,00) | 2 ou mais ocorrências (ou 1 de 100%) = Perda Total (-R$ 250,00)</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1273,7 +1349,7 @@ elif pagina == "04. Fechamento Variável (RV)":
         total_pagar = df_laudo["VALOR A PAGAR R$"].sum()
 
         qtd_100 = len(df_laudo[df_laudo["% PERDA RV"] == 0])
-        qtd_parcial = len(df_laudo[(df_laudo["% PERDA RV"] > 0) & (df_laudo["% PERDA RV"] < 100)])
+        qtd_parcial = len(df_laudo[df_laudo["% PERDA RV"] == 20])
         qtd_zerado = len(df_laudo[df_laudo["% PERDA RV"] == 100])
 
         k_rv1, k_rv2, k_rv3, k_rv4 = st.columns(4)
@@ -1285,15 +1361,15 @@ elif pagina == "04. Fechamento Variável (RV)":
             </div>""", unsafe_allow_html=True)
         with k_rv2:
             st.markdown(f"""<div class="kpi-card" style="border-left-color: #f59e0b;">
-                <div class="kpi-title">Elegibilidade Parcial</div>
+                <div class="kpi-title">Elegibilidade Parcial (-20%)</div>
                 <div class="kpi-value" style="color:#f59e0b;">{qtd_parcial}</div>
-                <div class="kpi-sub">Redução de 20% a 80%</div>
+                <div class="kpi-sub">Pagamento de R$ 200,00 (-R$ 50)</div>
             </div>""", unsafe_allow_html=True)
         with k_rv3:
             st.markdown(f"""<div class="kpi-card" style="border-left-color: #ef4444;">
-                <div class="kpi-title">Perda Total (Zerados)</div>
+                <div class="kpi-title">Perda Total (-100%)</div>
                 <div class="kpi-value" style="color:#ef4444;">{qtd_zerado}</div>
-                <div class="kpi-sub">Redução de 100% da RV</div>
+                <div class="kpi-sub">Pagamento R$ 0,00 (-R$ 250)</div>
             </div>""", unsafe_allow_html=True)
         with k_rv4:
             st.markdown(f"""<div class="kpi-card" style="border-left-color: #3b82f6;">
